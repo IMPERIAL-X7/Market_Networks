@@ -657,111 +657,158 @@ count at roughly **32,000**, not 64,302. Separately, all connections from a
 single source address to a single `(dest ip, dest port)` must have distinct
 ephemeral ports, capping a one-address run at ~55,000.
 
-**Measurements.** _[Fill in from `report/scalability.tsv`.]_
+**Measurements.** Every row was taken with the stated number of connections
+simultaneously established and idle. Raw data: `report/captures/`.
 
-| Idle connections | Established | Server RSS (KiB) | Server CPU % | Server open fds | System open files | Network memory | Max established |
-|---|---|---|---|---|---|---|---|
-| 5,000 | | | | | | | |
-| 10,000 | | | | | | | |
-| 20,000 | | | | | | | |
-| 30,000 | | | | | | | |
-| 40,000 | | | | | | | |
+*Default backend (`kqueue`):*
+
+| Idle connections | Established | Server RSS (KiB) | Server CPU % | Server open fds | System open files | Network mbuf bytes |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5,000 | 5,000 | 5,980 | 0.0 | 5,008 | 10,087 | 1,424 K |
+| 10,000 | 10,001 | 7,392 | 0.0 | 10,008 | 20,087 | 1,424 K |
+| 20,000 | 20,001 | 11,900 | 0.0 | 20,008 | 40,087 | 1,424 K |
+| 30,000 | 30,005 | 17,048 | 0.2 | 30,008 | 60,087 | 1,424 K |
+| 40,000 | **30,494** | — | — | — | ~64,300 (max) | 1,424 K |
+
+*Same sweep with `EXCHANGE_BACKEND=poll`:*
+
+| Idle connections | Established | Server RSS (KiB) | Server CPU % | Server open fds | System open files |
+|---:|---:|---:|---:|---:|---:|
+| 5,000 | 5,001 | 5,036 | 0.1 | 5,007 | 10,086 |
+| 10,000 | 10,001 | 6,212 | 0.6 | 10,007 | 20,086 |
+| 20,000 | 20,001 | 8,612 | 1.0 | 20,007 | 40,086 |
+| 30,000 | 30,003 | 11,308 | 2.5 | 30,007 | 60,086 |
+
+Three things stand out immediately. `sys_openfiles` tracks **2N**, not N.
+`server_fds` is N + 8 — one descriptor per connection, plus the listening
+socket, the kqueue and the standard streams. And the mbuf allocation does not
+move at all, because these connections never carry data and FreeBSD sizes
+socket buffers on demand.
 
 **1. Is the server able to maintain all requested connections at each count?**
-_[Answer from the table; `report/conn_gen_<N>.log` names the connection number
-at which each run first failed and the errno.]_ `EMFILE` indicates the
-descriptor limit, `ENOBUFS`/`ENOMEM` kernel socket-buffer memory, and
-`EADDRNOTAVAIL` on the client side indicates ephemeral-port exhaustion — a
-limit of the load generator, not of the server, and one that `--src-ips` works
-around.
+Yes up to 30,000, which it holds exactly (the small excess — 30,005 — is the
+sweep's own probe connections). At a target of 40,000 it fails: `conn_gen`
+stops at **30,494** with
+
+```
+conn_gen: first failure at connection 30495: socket() failed: Too many open files in system
+```
+
+That is `ENFILE`, a system-wide limit, reached on the *client's* `socket()`
+call. It is not a failure of the server: the server had already accepted all
+30,494 and was still serving them.
 
 **2. What is the first significant bottleneck?**
 Two distinct limits appear, and they constrain different things.
 
-The limit on the **number** of connections is the **system-wide file-descriptor
-table**. `conn_gen` fails with `socket() failed: Too many open files in system`
-(`ENFILE`) at **30,494** connections. That is not `kern.maxfiles` (64,302) but
-about half of it, because both endpoints of every connection live in this VM
-and each therefore costs two file entries — the `sys_openfiles` column confirms
-it, tracking 2N almost exactly. The per-process limit
-(`kern.maxfilesperproc` = 57,870) is never reached, so this is a system limit
-rather than one on the server.
+The limit on the **number** of connections is the **system-wide file
+descriptor table**. `kern.maxfiles` is 64,302, but the ceiling lands at ~30,500
+because both endpoints of every connection live in this VM and each costs a
+file entry — the `sys_openfiles` column, tracking 2N almost exactly, is the
+direct evidence. The per-process limit (`kern.maxfilesperproc` = 57,870) is
+never reached, so this is a limit of the machine, not of the server process.
 
 The limit on the **rate** of connection setup is the listening socket's accept
-queue, `kern.ipc.soacceptqueue`, which is **128** by default. Once the
-generator opens connections faster than the server drains that queue, the
-kernel resets the excess and `connect()` fails with `ECONNRESET`. This is
-backpressure on setup, not a ceiling on capacity, and `conn_gen` now retries
-through it; but it is what makes the server's per-accept work matter so much
-(see the logging problem above).
+queue, `kern.ipc.soacceptqueue`, which is **128** by default. `conn_gen`
+records how often it had to retry through it:
 
-Neither limit is memory or CPU. Server RSS grows by roughly **370 bytes per
-connection** — a `ClientSession` with two empty `std::string`s plus a
-hash-table slot — and CPU stays under 1%, because idle connections generate no
-events at all. Kernel socket-buffer memory (`netstat -m`) barely moves, since
-FreeBSD auto-sizes buffers from a small initial allocation and these
-connections never carry data.
+| Target | connect() retries |
+|---:|---:|
+| 5,000 | 0 |
+| 10,000 | 6 |
+| 20,000 | 45 |
+| 30,000 | 130 |
+
+This is backpressure on setup rate, not a ceiling on capacity, and it is also
+what made the per-accept logging problem described earlier so damaging.
+
+Neither limit is memory or CPU, and this is the main result: at 30,000 idle
+connections the server uses **17 MB** of RSS and **0.2%** of one CPU.
 
 **3. How does the concurrency/I/O design contribute to it?**
 The server uses **I/O multiplexing on a single thread**, not a thread or
-process per connection. There is therefore no per-connection stack, no
-scheduler entry and no context-switch cost, and the limit lands on kernel
-per-socket resources — descriptors and socket buffers — rather than on
-anything the application does. A thread-per-connection design would have failed
-far earlier: at the default 8 MB stack reservation, 70,000 threads would need
-roughly 550 GB of address space, and on 2 vCPUs the scheduler would have become
-the bottleneck long before the descriptor table did.
+process per connection. There is no per-connection stack, no scheduler entry
+and no context-switch cost, so the limit lands on kernel per-socket resources
+rather than on anything the application does. Per-connection cost measured from
+the table is about **445 bytes** of RSS under `kqueue` and **250 bytes** under
+`poll` — a hash-table entry and a session object, nothing more. A
+thread-per-connection design could not have reached these numbers: at the
+default 8 MB stack reservation, 30,000 threads would need ~230 GB of address
+space, and on 2 vCPUs the scheduler would have collapsed long before the
+descriptor table filled.
 
 **4. Would changing the mechanism help?**
-Not for this bottleneck. Descriptor limits and socket-buffer memory are
-per-socket kernel costs, identical whether readiness comes from `poll()`,
-`kqueue()` or a thread. What the mechanism changes is the **cost per event-loop
-iteration**: `poll()` copies and scans an array of all N descriptors on every
-call, O(N) even when nothing is ready, whereas `kqueue()` registers interest
-once and returns only the ready descriptors, O(ready). At tens of thousands of
-mostly-idle connections that is the difference between scanning the whole set
-on every wakeup and being handed the one or two that matter — so `kqueue`
-reduces CPU and latency, but not memory or descriptor consumption. Going the
-other way, replacing multiplexing with thread-per-connection would make
-everything worse.
+Not with the descriptor limit, which is a kernel per-socket cost identical
+under `poll`, `kqueue` or threads — and the two tables confirm it: both
+backends reach the same ~30,000 and hold the same number of descriptors. What
+the mechanism changes is the cost of each event-loop iteration, and that
+difference is clearly visible in the CPU column.
 
 **5. Quantify the trade-off.**
-The same binary supports both mechanisms, so the comparison is direct:
+Running the identical sweep under both backends isolates it:
 
-```sh
-EXCHANGE_BACKEND=poll   sh tools/measure_scalability.sh 127.0.0.1 5000 10000 20000 30000
-EXCHANGE_BACKEND=kqueue sh tools/measure_scalability.sh 127.0.0.1 5000 10000 20000 30000
-```
+| Idle connections | CPU under `poll` | CPU under `kqueue` | RSS under `poll` | RSS under `kqueue` |
+|---:|---:|---:|---:|---:|
+| 5,000 | 0.1 % | 0.0 % | 5,036 KiB | 5,980 KiB |
+| 10,000 | 0.6 % | 0.0 % | 6,212 KiB | 7,392 KiB |
+| 20,000 | 1.0 % | 0.0 % | 8,612 KiB | 11,900 KiB |
+| 30,000 | **2.5 %** | **0.2 %** | 11,308 KiB | 17,048 KiB |
 
-_[Record server CPU under each backend at the same connection counts, with a
-steady trickle of trades so the loop wakes regularly.]_ The expectation is
-near-identical RSS and descriptor usage, with CPU per wakeup growing linearly
-in N under `poll` and staying flat under `kqueue`.
+`poll`'s CPU grows roughly linearly with the number of connections — 0.1 % to
+2.5 % over a sixfold increase — because every call copies and scans an array of
+all N descriptors even though none of them is ready. `kqueue`'s stays flat near
+zero: interest is registered once, and each call returns only the descriptors
+that are actually ready, so an idle connection costs nothing per iteration.
+Extrapolating `poll`'s trend, 70,000 idle connections would cost around 6 % of
+a CPU purely to discover that nothing has happened.
+
+The trade-off runs the other way on memory: `kqueue` costs about **5.7 MB more**
+at 30,000 connections (195 bytes per connection). That is this implementation's
+doing rather than the kernel's — the backend keeps an interest map keyed by
+descriptor, and sizes its `kevent` result buffer at two entries per registered
+descriptor, which is 2.9 MB of the difference on its own and could be capped
+without changing behaviour.
+
+So: `kqueue` trades a few megabytes for an order of magnitude less CPU at
+scale, and the more idle the connections, the better that trade looks. `poll`
+remains the reasonable choice only at small connection counts, which is why it
+is kept as a runtime option rather than removed.
 
 **Reaching 70,000 connections.** It cannot be done with this VM's stock
-settings; the following are needed (all require root):
+settings; the following are needed, all requiring root:
 
 ```sh
-sysctl kern.maxfiles=250000            # 2 file entries per loopback connection
+sysctl kern.maxfiles=250000            # two file entries per loopback connection
 sysctl kern.maxfilesperproc=200000
+sysctl kern.ipc.soacceptqueue=4096     # fewer connect() retries during setup
 ifconfig lo0 alias 127.0.0.2/8         # each source address has its own
 ifconfig lo0 alias 127.0.0.3/8         # ephemeral port range
-sysctl net.inet.ip.portrange.first=10000
 
 SRC_IPS=127.0.0.1,127.0.0.2,127.0.0.3 \
     sh tools/measure_scalability.sh 127.0.0.1 5000 50000 60000 70000
 ```
 
-Memory is the remaining question at that scale: with 2 GB of RAM and FreeBSD
-auto-sizing socket buffers from a small initial allocation, 70,000 idle
-connections are plausible only because idle buffers stay small; any real
-traffic on them would not fit.
+Extrapolating the measured 445 bytes per connection, 70,000 connections would
+need roughly 31 MB of server RSS — comfortable within 2 GB. The descriptor
+table, not memory, is what has to be raised.
+
+> **A warning worth recording.** The 40,000-connection attempt drove
+> `kern.openfiles` to `kern.maxfiles`, and the consequence was not a failed
+> `connect()` but an unusable machine: with the file table full, no process
+> could be forked and not even `/bin/sh` could load its shared libraries, so
+> nothing could be killed from inside and the VM had to be rebooted.
+> `tools/measure_scalability.sh` now refuses targets above
+> `(kern.maxfiles - 4000) / 2` unless `FORCE=1`, and `conn_gen --hold-seconds`
+> releases the connections even if the controlling script dies.
 
 **Bonus deliverables checklist.**
 
 - [x] Client-generation program: `src/tools/conn_gen.cpp` (`bin/conn_gen`).
-- [ ] Completed resource-measurement table (above).
+- [x] Completed resource-measurement table (above), for both I/O backends.
 - [ ] Screenshots of the FreeBSD commands and outputs at the required
-      connection counts, each showing the active connection count and the
-      corresponding measurements.
-- [ ] Analysis answering questions 1–5 (above).
+      connection counts. The measurements themselves are recorded in
+      `report/captures/scalability_kqueue.tsv` and `scalability_poll.tsv`;
+      re-run `tools/measure_scalability.sh` and screenshot the terminal, or
+      capture `netstat -an -p tcp | grep -c 5000`, `procstat -f <pid>`,
+      `sysctl kern.openfiles` and `ps -o rss,%cpu` while a run is holding.
+- [x] Analysis answering questions 1–5 (above).

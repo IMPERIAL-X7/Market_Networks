@@ -1,7 +1,9 @@
 conn_gen: target 10000 connections to 127.0.0.1:5000, RLIMIT_NOFILE soft limit 57870
-established 5000 connections in 0.06s (85083 conn/s), RLIMIT_NOFILE soft limit 57870
-established 10000 connections in 0.11s (91973 conn/s), RLIMIT_NOFILE soft limit 57870
-established 10000 connections in 0.11s (91964 conn/s), RLIMIT_NOFILE soft limit 57870
-conn_gen: own max RSS 3524 KiB, user 0.02s, system 0.05s
-conn_gen: pid 4854. Take the server-side measurements now.
+established 5000 connections in 10.30s (485 conn/s), RLIMIT_NOFILE soft limit 57870
+established 10000 connections in 10.35s (966 conn/s), RLIMIT_NOFILE soft limit 57870
+established 10000 connections in 10.35s (966 conn/s), RLIMIT_NOFILE soft limit 57870
+conn_gen: 6 connect() retries (the server's accept queue filled; kern.ipc.soacceptqueue)
+conn_gen: own max RSS 3516 KiB, user 0.01s, system 0.05s
+conn_gen: pid 4654. Take the server-side measurements now.
+conn_gen: holding for 75 seconds.
 conn_gen: closing 10000 connections.

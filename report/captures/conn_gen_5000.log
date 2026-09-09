@@ -1,6 +1,7 @@
 conn_gen: target 5000 connections to 127.0.0.1:5000, RLIMIT_NOFILE soft limit 57870
-established 5000 connections in 0.06s (80077 conn/s), RLIMIT_NOFILE soft limit 57870
-established 5000 connections in 0.06s (80050 conn/s), RLIMIT_NOFILE soft limit 57870
-conn_gen: own max RSS 3492 KiB, user 0.02s, system 0.02s
-conn_gen: pid 4761. Take the server-side measurements now.
+established 5000 connections in 72.35s (69 conn/s), RLIMIT_NOFILE soft limit 57870
+established 5000 connections in 72.35s (69 conn/s), RLIMIT_NOFILE soft limit 57870
+conn_gen: own max RSS 3472 KiB, user 0.01s, system 0.03s
+conn_gen: pid 4383. Take the server-side measurements now.
+conn_gen: holding for 75 seconds.
 conn_gen: closing 5000 connections.
