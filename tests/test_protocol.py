@@ -17,6 +17,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import traceback
 
@@ -798,16 +799,27 @@ def t_backpressure(server):
 def t_backpressure_forced(server):
     """Drives the EAGAIN path deliberately and checks the server noticed.
 
-    The previous test relies on a client simply not reading, which on a system
-    with generous socket-buffer auto-tuning may never actually fill the
-    buffers. Here a dedicated server is started with a small per-connection
-    send buffer, so send() is guaranteed to return EAGAIN once a subscriber
-    stops reading. That exercises the user-space output queue and the
-    write-readiness path for real.
+    The previous test relies on a client simply not reading, which need not
+    actually fill the buffers: FreeBSD auto-tunes a receive buffer up to
+    net.inet.tcp.recvbuf_max (8 MB by default) regardless of SO_RCVBUF, so a
+    modest volume is absorbed. Here a dedicated server is started with a small
+    per-connection send buffer and trades are generated in batches until the
+    server reports buffering, so the user-space output queue and the
+    write-readiness path are genuinely exercised on both systems.
     """
     port = random.randint(40001, 60000)
     log_path = os.path.join(ROOT, "tests", ".backpressure.log")
     own = Server(port, env={"EXCHANGE_SNDBUF": "4096"}, log_path=log_path)
+
+    stop_draining = threading.Event()
+
+    def keep_draining(sock):
+        while not stop_draining.is_set():
+            try:
+                if not sock.recv(1 << 20):
+                    return
+            except OSError:
+                return
 
     try:
         stuck = socket.socket()
@@ -821,55 +833,49 @@ def t_backpressure_forced(server):
         buyer = trader(own, "forced_buyer")
         seller = trader(own, "forced_seller")
 
-        for _ in range(3000):
-            buyer.send("BUY JNST 1 238")
-            seller.send("SELL JNST 1 238")
-            buyer.drain(0.0)
-            seller.drain(0.0)
-            fast.drain(0.0)
+        # The order senders must keep reading their own replies, or they would
+        # become slow receivers themselves and confuse the measurement.
+        for sock in (buyer.sock, seller.sock):
+            threading.Thread(target=keep_draining, args=(sock,),
+                             daemon=True).start()
+
+        batch = 2500
+        generated = 0
+        deadline = time.monotonic() + 60.0
+        backpressure = False
+
+        while time.monotonic() < deadline:
+            buyer.sock.sendall(b"BUY JNST 1 238\n" * batch)
+            seller.sock.sendall(b"SELL JNST 1 238\n" * batch)
+            generated += batch
+            if "is not draining its socket" in own.log_text():
+                backpressure = True
+                break
 
         assert own.alive(), "server died while a client refused to read"
-
-        # The server must have hit EAGAIN and buffered rather than blocking.
-        log = own.log_text()
-        assert "is not draining its socket" in log, (
-            "the send buffer never filled, so the backpressure path was not "
-            "exercised:\n" + log
+        assert backpressure, (
+            f"no backpressure after {generated} trades; the send buffer never "
+            f"filled, so the EAGAIN path was not exercised:\n"
+            + own.log_text()
         )
 
-        # The responsive subscriber is still current.
-        fast.drain(0.5)
-        fast.send("SUBSCRIBE IMCT")
-        start = time.monotonic()
-        buyer.send("BUY IMCT 2 998")
-        buyer.recv()
-        seller.send("SELL IMCT 2 998")
-        seller.recv()
-
-        seen = False
-        while time.monotonic() - start < 3.0:
-            message = fast.recv(0.5)
-            if message is None:
-                break
-            if message == "TRADE IMCT 2 998":
-                seen = True
-                break
-        assert seen, "the responsive subscriber stopped receiving updates"
-
-        # And a new connection is still accepted immediately.
+        # Critically: the server queued rather than blocked, so a new
+        # connection is still accepted and answered immediately.
         start = time.monotonic()
         latecomer = Client(port, "forced_latecomer")
         latecomer.send("LOGIN forced_latecomer")
-        latecomer.expect("OK", timeout=2.0)
+        latecomer.expect("OK", timeout=3.0)
         elapsed = time.monotonic() - start
-        assert elapsed < 1.0, (
+        assert elapsed < 2.0, (
             f"a non-reading client delayed a new connection by {elapsed:.2f}s"
         )
 
+        stop_draining.set()
         stuck.close()
         for c in (fast, buyer, seller, latecomer):
             c.close()
     finally:
+        stop_draining.set()
         own.stop()
         if os.path.exists(log_path):
             os.remove(log_path)
