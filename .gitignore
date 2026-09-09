@@ -1,6 +1,7 @@
-src/exchange_server
-src/trader_client
-src/market_data_client
-src/tools/conn_gen
+bin/
 build/
 *.o
+*.d
+A2_*.zip
+report/scalability.tsv
+report/conn_gen_*.log

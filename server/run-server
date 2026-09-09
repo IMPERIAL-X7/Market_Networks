@@ -1,13 +1,15 @@
 #!/bin/sh
-# Launches the Exchange Server. Arguments are passed straight through, so the
-# experiment harness can call: ./server/run-server 127.0.0.1 5000
+# Launches the Exchange Server. Arguments are passed straight through:
+#   ./server/run-server 127.0.0.1 5000
 set -e
 here=$(dirname "$0")
 root=$(cd "$here/.." && pwd)
 
-# Build on first use so the submission works from a clean checkout.
+# Build on demand so a clean checkout works, but build only this one program:
+# the experiment harness allows just a few seconds for the server to start.
+# Running "make" once beforehand avoids the delay entirely.
 if [ ! -x "$root/bin/exchange_server" ]; then
-    make -C "$root" >&2
+    make -C "$root" -j4 "bin/exchange_server" >&2
 fi
 
 exec "$root/bin/exchange_server" "$@"

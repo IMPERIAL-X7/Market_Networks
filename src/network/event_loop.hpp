@@ -8,7 +8,11 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(__FreeBSD__) || defined(__APPLE__) || defined(__NetBSD__) || \
+// Define EXCHANGE_FORCE_KQUEUE to compile the kqueue backend on a host that
+// is not FreeBSD, so it can be syntax-checked away from the target system.
+#if defined(EXCHANGE_FORCE_KQUEUE)
+#define EXCHANGE_HAVE_KQUEUE 1
+#elif defined(__FreeBSD__) || defined(__APPLE__) || defined(__NetBSD__) || \
     defined(__OpenBSD__)
 #define EXCHANGE_HAVE_KQUEUE 1
 #else

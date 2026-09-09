@@ -20,7 +20,7 @@ event-loop library, and no threads.
 ## Building
 
 ```sh
-make
+make          # or: make -j4
 ```
 
 This produces four executables in `bin/`:
@@ -36,7 +36,10 @@ This produces four executables in `bin/`:
 compiler use `make CXX=g++`.
 
 The launcher scripts build on demand, so `./server/run-server 127.0.0.1 5000`
-works from a clean checkout without running `make` first.
+works from a clean checkout without running `make` first — each builds only the
+one program it needs. Running `make` once beforehand is still worth it: the
+experiment harness allows the server only five seconds to start listening, and
+a cold build eats into that budget.
 
 ## Running
 

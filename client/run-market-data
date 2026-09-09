@@ -1,11 +1,15 @@
 #!/bin/sh
-# Launches a Market-Data Client: ./client/run-market-data 127.0.0.1 5000 JNST
+# Launches the Market-Data Client. Arguments are passed straight through:
+#   ./client/run-market-data 127.0.0.1 5000 JNST
 set -e
 here=$(dirname "$0")
 root=$(cd "$here/.." && pwd)
 
+# Build on demand so a clean checkout works, but build only this one program:
+# the experiment harness allows just a few seconds for the server to start.
+# Running "make" once beforehand avoids the delay entirely.
 if [ ! -x "$root/bin/market_data_client" ]; then
-    make -C "$root" >&2
+    make -C "$root" -j4 "bin/market_data_client" >&2
 fi
 
 exec "$root/bin/market_data_client" "$@"
