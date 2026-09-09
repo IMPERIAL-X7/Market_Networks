@@ -1,0 +1,26 @@
+# Excerpt of server_40000.log from the run that exhausted the system file table.
+# The full log was 589,467 lines, of which 558,971 were the same error line:
+#   exchange_server: accept() failed: Too many open files in system
+# repeated because accept() was retried immediately on a permanently
+# readable listening socket. Fixed in commit 54ab7f3 (accept back-off).
+#
+# --- first lines ---
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:63866 (1 clients)
+[+] connection accepted: fd 6 from 127.0.0.1:18323 (2 clients)
+[+] connection accepted: fd 7 from 127.0.0.1:45927 (3 clients)
+# --- around the failure ---
+30492-[+] connection accepted: fd 30495 from 127.0.0.1:62750 (30491 clients)
+30493-[+] connection accepted: fd 30496 from 127.0.0.1:52311 (30492 clients)
+30494:exchange_server: accept() failed: Too many open files in system
+exchange_server: accept() failed: Too many open files in system
+exchange_server: accept() failed: Too many open files in system
+exchange_server: accept() failed: Too many open files in system
+exchange_server: accept() failed: Too many open files in system
+exchange_server: accept() failed: Too many open files in system
+exchange_server: accept() failed: Too many open files in system
+# ... 558,971 occurrences of the line above ...
+# --- last lines ---
+[+] connection accepted: fd 30498 from 127.0.0.1:58911 (30494 clients)
+exchange_server: accept() failed: Too many open files in system
+Exchange Server shutting down; closing 30494 connection(s).
