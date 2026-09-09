@@ -72,6 +72,30 @@ connection owns an input buffer and an output buffer:
 - **`SO_REUSEADDR`** on the listening socket, so the server can rebind
   immediately when the harness restarts it.
 
+### Two robustness problems the scalability work exposed
+
+Both were found by running the bonus experiment, and neither is visible at the
+scale of Experiments 1–8.
+
+**`accept()` under resource exhaustion.** When `accept()` failed with `ENFILE`
+("too many open files in system"), the server retried it immediately. The
+listening socket stays readable while connections are pending, so the event
+loop reported it again at once and the server spun at full CPU: a single run
+produced **558,971 identical error lines**. The server now distinguishes
+resource-exhaustion errnos (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`) from
+ordinary failures, drops read interest on the listening socket for one second,
+and retries — leaving the pending connections queued rather than burning the
+CPU on a condition it cannot fix.
+
+**Logging in the accept path.** Logging every accepted connection with an
+`fflush` made the accept loop slow enough that the kernel's accept queue —
+`kern.ipc.soacceptqueue`, only **128** entries by default — overflowed, and
+FreeBSD answered the excess connections with `RST`. A 20,000-connection run
+failed at 4,366 with `ECONNRESET`. Connection logging is now per-connection up
+to 64 clients, which covers every experiment in this report, and periodic above
+that. The lesson generalises: work done between `accept()` calls is charged
+against a queue that is far smaller than one might assume.
+
 ---
 
 ## Experiment 1 — Listening and Connected Sockets
@@ -652,14 +676,31 @@ limit of the load generator, not of the server, and one that `--src-ips` works
 around.
 
 **2. What is the first significant bottleneck?**
-The **file-descriptor limit**, and it is reached at about half the nominal
-figure because both ends of each connection are local: at N connections the
-system holds 2N open files against `kern.maxfiles` = 64,302. Server RSS grows
-only modestly — a `ClientSession` holding two empty `std::string`s plus a
-hash-table slot is on the order of 150–250 bytes, so 30,000 sessions is a few
-megabytes of application state — and CPU stays near zero, because idle
-connections generate no events at all. Kernel socket-buffer memory
-(`netstat -m`) is the next constraint behind descriptors.
+Two distinct limits appear, and they constrain different things.
+
+The limit on the **number** of connections is the **system-wide file-descriptor
+table**. `conn_gen` fails with `socket() failed: Too many open files in system`
+(`ENFILE`) at **30,494** connections. That is not `kern.maxfiles` (64,302) but
+about half of it, because both endpoints of every connection live in this VM
+and each therefore costs two file entries — the `sys_openfiles` column confirms
+it, tracking 2N almost exactly. The per-process limit
+(`kern.maxfilesperproc` = 57,870) is never reached, so this is a system limit
+rather than one on the server.
+
+The limit on the **rate** of connection setup is the listening socket's accept
+queue, `kern.ipc.soacceptqueue`, which is **128** by default. Once the
+generator opens connections faster than the server drains that queue, the
+kernel resets the excess and `connect()` fails with `ECONNRESET`. This is
+backpressure on setup, not a ceiling on capacity, and `conn_gen` now retries
+through it; but it is what makes the server's per-accept work matter so much
+(see the logging problem above).
+
+Neither limit is memory or CPU. Server RSS grows by roughly **370 bytes per
+connection** — a `ClientSession` with two empty `std::string`s plus a
+hash-table slot — and CPU stays under 1%, because idle connections generate no
+events at all. Kernel socket-buffer memory (`netstat -m`) barely moves, since
+FreeBSD auto-sizes buffers from a small initial allocation and these
+connections never carry data.
 
 **3. How does the concurrency/I/O design contribute to it?**
 The server uses **I/O multiplexing on a single thread**, not a thread or
