@@ -1,0 +1,11 @@
+conn_gen: target 30000 connections to 127.0.0.1:5000, RLIMIT_NOFILE soft limit 57870
+established 5000 connections in 74.69s (67 conn/s), RLIMIT_NOFILE soft limit 57870
+established 10000 connections in 74.73s (134 conn/s), RLIMIT_NOFILE soft limit 57870
+established 15000 connections in 74.76s (201 conn/s), RLIMIT_NOFILE soft limit 57870
+established 20000 connections in 74.80s (267 conn/s), RLIMIT_NOFILE soft limit 57870
+established 25000 connections in 74.84s (334 conn/s), RLIMIT_NOFILE soft limit 57870
+established 30000 connections in 74.89s (401 conn/s), RLIMIT_NOFILE soft limit 57870
+established 30000 connections in 74.89s (401 conn/s), RLIMIT_NOFILE soft limit 57870
+conn_gen: own max RSS 3580 KiB, user 0.02s, system 0.18s
+conn_gen: pid 5188. Take the server-side measurements now.
+conn_gen: closing 30000 connections.

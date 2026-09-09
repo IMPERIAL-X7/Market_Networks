@@ -57,7 +57,17 @@ void usage(const char* program) {
         "                       ifconfig lo0 alias 127.0.0.2/8\n"
         "  --hold             keep the connections open until interrupted "
         "(default)\n"
-        "  --no-hold          exit as soon as the target count is reached\n",
+        "  --no-hold          exit as soon as the target count is reached\n"
+        "  --hold-seconds N   hold for N seconds, then close and exit. Use "
+        "this in\n"
+        "                     scripts: it guarantees the connections are "
+        "released\n"
+        "                     even if the controlling script dies, which "
+        "matters\n"
+        "                     because enough held connections can exhaust the "
+        "system\n"
+        "                     file table and leave the machine unable to fork "
+        "at all.\n",
         program);
 }
 
@@ -116,6 +126,7 @@ int main(int argc, char** argv) {
 
     long report_every = 5000;
     bool hold = true;
+    long hold_seconds = -1;  // negative means "until interrupted"
     std::vector<std::string> source_addresses;
 
     for (int i = 4; i < argc; ++i) {
@@ -129,6 +140,9 @@ int main(int argc, char** argv) {
             hold = true;
         } else if (arg == "--no-hold") {
             hold = false;
+        } else if (arg == "--hold-seconds" && i + 1 < argc) {
+            hold_seconds = std::atol(argv[++i]);
+            hold = true;
         } else {
             usage(argv[0]);
             return 2;
@@ -227,7 +241,13 @@ int main(int argc, char** argv) {
 
     // Idle hold: the connections stay established, exchanging no application
     // data, until the measurements have been taken.
+    if (hold && hold_seconds >= 0) {
+        std::printf("conn_gen: holding for %ld seconds.\n", hold_seconds);
+        std::fflush(stdout);
+    }
+    const double hold_until = now_seconds() + static_cast<double>(hold_seconds);
     while (hold && !g_stop) {
+        if (hold_seconds >= 0 && now_seconds() >= hold_until) break;
         struct timespec interval;
         interval.tv_sec = 1;
         interval.tv_nsec = 0;
