@@ -63,8 +63,12 @@ bool env_flag(const char* name) {
 class ExchangeServer {
 public:
     ExchangeServer(const std::string& host, int port,
-                   net::EventLoop::Backend backend, bool verbose)
-        : listener_(host, port), loop_(backend), verbose_(verbose) {}
+                   net::EventLoop::Backend backend, bool verbose,
+                   int send_buffer_bytes)
+        : listener_(host, port),
+          loop_(backend),
+          verbose_(verbose),
+          send_buffer_bytes_(send_buffer_bytes) {}
 
     bool start() {
         if (!listener_.start(SOMAXCONN)) {
@@ -135,6 +139,7 @@ private:
     TCPServer listener_;
     net::EventLoop loop_;
     bool verbose_;
+    int send_buffer_bytes_;
 
     std::unordered_map<int, ClientSession> sessions_;
     std::unordered_map<std::string, std::unordered_set<int>> subscribers_;
@@ -158,6 +163,10 @@ private:
                                  listener_.error().c_str());
                 }
                 return;
+            }
+
+            if (send_buffer_bytes_ > 0) {
+                net::set_send_buffer(fd, send_buffer_bytes_);
             }
 
             ClientSession session(fd);
@@ -602,7 +611,8 @@ void usage(const char* program) {
                  "  --verbose, -v       log every recv() and every framed "
                  "message\n"
                  "\n"
-                 "Environment: EXCHANGE_BACKEND, EXCHANGE_VERBOSE\n",
+                 "Environment: EXCHANGE_BACKEND, EXCHANGE_VERBOSE, "
+                 "EXCHANGE_SNDBUF\n",
                  program, kDefaultHost, kDefaultPort);
 }
 
@@ -612,6 +622,14 @@ int main(int argc, char** argv) {
     std::string host = kDefaultHost;
     int port = kDefaultPort;
     bool verbose = env_flag("EXCHANGE_VERBOSE");
+
+    // Optional: shrink the per-connection send buffer so that a client which
+    // stops reading causes send() to return EAGAIN at a modest data volume.
+    int send_buffer_bytes = 0;
+    if (const char* value = std::getenv("EXCHANGE_SNDBUF")) {
+        send_buffer_bytes = std::atoi(value);
+        if (send_buffer_bytes < 0) send_buffer_bytes = 0;
+    }
 
     net::EventLoop::Backend backend = net::EventLoop::default_backend();
     if (const char* name = std::getenv("EXCHANGE_BACKEND")) {
@@ -676,7 +694,7 @@ int main(int argc, char** argv) {
 
     net::raise_fd_limit();
 
-    ExchangeServer server(host, port, backend, verbose);
+    ExchangeServer server(host, port, backend, verbose, send_buffer_bytes);
     if (!server.start()) return 1;
     server.run();
     return 0;

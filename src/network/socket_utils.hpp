@@ -27,6 +27,12 @@ int create_listening_socket(const std::string& host, int port, int backlog,
 // Returns -1 on failure, with a human-readable reason in err.
 int connect_to(const std::string& host, int port, std::string& err);
 
+// Overrides a socket's send buffer size. Shrinking it makes TCP flow control
+// and the resulting backpressure visible at modest data volumes, which is what
+// the slow-receiver experiment needs on a system with generous defaults.
+// Returns the size the kernel actually applied, or -1 on failure.
+int set_send_buffer(int fd, int bytes);
+
 // Formats "ip:port" for a connected descriptor's peer, for logging.
 std::string peer_name(int fd);
 

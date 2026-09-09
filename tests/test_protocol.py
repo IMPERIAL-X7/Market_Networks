@@ -114,19 +114,36 @@ class Client:
 
 
 class Server:
-    def __init__(self, port, env=None):
+    def __init__(self, port, env=None, log_path=None):
         self.port = port
+        self.log_path = log_path
         merged = dict(os.environ)
         merged.update(env or {})
+
+        if log_path:
+            self._log = open(log_path, "w")
+            stdout = self._log
+        else:
+            self._log = None
+            stdout = subprocess.DEVNULL if not VERBOSE else None
+
         self.proc = subprocess.Popen(
             [os.path.join(ROOT, "server", "run-server"), HOST, str(port)],
             cwd=ROOT,
-            stdout=subprocess.DEVNULL if not VERBOSE else None,
-            stderr=None,
+            stdout=stdout,
+            stderr=subprocess.STDOUT if log_path else None,
             start_new_session=True,
             env=merged,
         )
         self._wait_ready()
+
+    def log_text(self):
+        if not self.log_path:
+            return ""
+        if self._log:
+            self._log.flush()
+        with open(self.log_path) as handle:
+            return handle.read()
 
     def _wait_ready(self, timeout=10.0):
         deadline = time.monotonic() + timeout
@@ -163,6 +180,9 @@ class Server:
             except subprocess.TimeoutExpired:
                 os.killpg(self.proc.pid, 9)
                 self.proc.wait(timeout=2)
+        if self._log:
+            self._log.close()
+            self._log = None
 
 
 TESTS = []
@@ -772,6 +792,87 @@ def t_backpressure(server):
 
     for c in (slow, fast, buyer, seller, latecomer):
         c.close()
+
+
+@test("A full send buffer makes the server queue output instead of blocking")
+def t_backpressure_forced(server):
+    """Drives the EAGAIN path deliberately and checks the server noticed.
+
+    The previous test relies on a client simply not reading, which on a system
+    with generous socket-buffer auto-tuning may never actually fill the
+    buffers. Here a dedicated server is started with a small per-connection
+    send buffer, so send() is guaranteed to return EAGAIN once a subscriber
+    stops reading. That exercises the user-space output queue and the
+    write-readiness path for real.
+    """
+    port = random.randint(40001, 60000)
+    log_path = os.path.join(ROOT, "tests", ".backpressure.log")
+    own = Server(port, env={"EXCHANGE_SNDBUF": "4096"}, log_path=log_path)
+
+    try:
+        stuck = socket.socket()
+        stuck.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+        stuck.connect((HOST, port))
+        stuck.sendall(b"SUBSCRIBE JNST\n")
+        time.sleep(0.3)
+        # Never read from `stuck` again.
+
+        fast = market_data(own, "JNST", name="fast_forced")
+        buyer = trader(own, "forced_buyer")
+        seller = trader(own, "forced_seller")
+
+        for _ in range(3000):
+            buyer.send("BUY JNST 1 238")
+            seller.send("SELL JNST 1 238")
+            buyer.drain(0.0)
+            seller.drain(0.0)
+            fast.drain(0.0)
+
+        assert own.alive(), "server died while a client refused to read"
+
+        # The server must have hit EAGAIN and buffered rather than blocking.
+        log = own.log_text()
+        assert "is not draining its socket" in log, (
+            "the send buffer never filled, so the backpressure path was not "
+            "exercised:\n" + log
+        )
+
+        # The responsive subscriber is still current.
+        fast.drain(0.5)
+        fast.send("SUBSCRIBE IMCT")
+        start = time.monotonic()
+        buyer.send("BUY IMCT 2 998")
+        buyer.recv()
+        seller.send("SELL IMCT 2 998")
+        seller.recv()
+
+        seen = False
+        while time.monotonic() - start < 3.0:
+            message = fast.recv(0.5)
+            if message is None:
+                break
+            if message == "TRADE IMCT 2 998":
+                seen = True
+                break
+        assert seen, "the responsive subscriber stopped receiving updates"
+
+        # And a new connection is still accepted immediately.
+        start = time.monotonic()
+        latecomer = Client(port, "forced_latecomer")
+        latecomer.send("LOGIN forced_latecomer")
+        latecomer.expect("OK", timeout=2.0)
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0, (
+            f"a non-reading client delayed a new connection by {elapsed:.2f}s"
+        )
+
+        stuck.close()
+        for c in (fast, buyer, seller, latecomer):
+            c.close()
+    finally:
+        own.stop()
+        if os.path.exists(log_path):
+            os.remove(log_path)
 
 
 @test("Oversized input without a newline is rejected, not buffered forever")

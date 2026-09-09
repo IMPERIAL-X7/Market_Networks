@@ -90,13 +90,15 @@ Everything has a working default; these only exist for the experiments.
 |---|---|---|
 | `--backend=poll\|kqueue` | `EXCHANGE_BACKEND` | I/O readiness mechanism. Defaults to `kqueue` on FreeBSD, `poll` elsewhere. |
 | `--verbose`, `-v` | `EXCHANGE_VERBOSE` | Log every `recv()` with its byte count and every reassembled message. |
+| — | `EXCHANGE_SNDBUF` | `SO_SNDBUF` in bytes for accepted connections. Shrinking it makes TCP flow control and backpressure visible at modest data volumes. |
 
 The environment variables are useful because the experiment harness invokes
 `run-server` with a fixed argument list:
 
 ```sh
 EXCHANGE_VERBOSE=1 python3 experiment.py 3     # shows message reassembly
-EXCHANGE_BACKEND=poll python3 experiment.py 5  # compares the two backends
+EXCHANGE_BACKEND=poll python3 experiment.py 5   # compares the two backends
+EXCHANGE_SNDBUF=4096 python3 experiment.py 7    # forces visible backpressure
 ```
 
 ## Protocol

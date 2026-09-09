@@ -127,6 +127,16 @@ int connect_to(const std::string& host, int port, std::string& err) {
     return fd;
 }
 
+int set_send_buffer(int fd, int bytes) {
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof(bytes)) != 0) {
+        return -1;
+    }
+    int applied = 0;
+    socklen_t len = sizeof(applied);
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &applied, &len) != 0) return -1;
+    return applied;
+}
+
 std::string peer_name(int fd) {
     struct sockaddr_in addr;
     socklen_t len = sizeof(addr);
