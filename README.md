@@ -104,6 +104,19 @@ EXCHANGE_BACKEND=poll python3 experiment.py 5   # compares the two backends
 EXCHANGE_SNDBUF=4096 python3 experiment.py 7    # forces visible backpressure
 ```
 
+### Between experiment runs
+
+Several experiments end by waiting for Ctrl-C. If one is interrupted in a way
+that leaves the server process alive, it keeps port 5000 bound, and the next
+run's server exits with `bind() failed: Address already in use` while the
+harness silently attaches to the *stale* server instead. Check for leftovers
+before each run:
+
+```sh
+sockstat -4 -p 5000        # FreeBSD
+pkill -x exchange_server
+```
+
 ## Protocol
 
 Each message is one line terminated by `\n`. All numbers are integers;
