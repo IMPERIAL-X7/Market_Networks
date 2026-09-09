@@ -1,0 +1,6 @@
+src/exchange_server
+src/trader_client
+src/market_data_client
+src/tools/conn_gen
+build/
+*.o
