@@ -98,6 +98,21 @@ std::vector<std::string> split_commas(const std::string& text) {
     return parts;
 }
 
+// Distinguishes a transient refusal from a real resource limit.
+//
+// The listening socket's accept queue is small (kern.ipc.soacceptqueue is 128
+// by default). A generator that opens connections faster than the server
+// accepts them will overflow it, and FreeBSD answers the excess with RST, so
+// connect() fails with ECONNRESET or ECONNREFUSED. That is backpressure on the
+// rate of connection setup, not a ceiling on the number of connections, so it
+// is retried. The limits this experiment is actually measuring - descriptors
+// and socket memory - are the errnos treated as terminal below.
+bool is_transient(int error) {
+    return error == ECONNRESET || error == ECONNREFUSED ||
+           error == ETIMEDOUT || error == EINTR || error == EAGAIN ||
+           error == EWOULDBLOCK;
+}
+
 void report(std::size_t established, double elapsed, long fd_limit) {
     std::printf(
         "established %zu connections in %.2fs (%.0f conn/s), "
@@ -171,12 +186,17 @@ int main(int argc, char** argv) {
 
     const double started = now_seconds();
     std::string error;
+    long retries = 0;
 
     for (long i = 0; i < target && !g_stop; ++i) {
         int fd;
+        int attempt = 0;
+    retry:
 
+        int last_errno = 0;
         if (source_addresses.empty()) {
             fd = net::connect_to(host, port, error);
+            last_errno = errno;
         } else {
             // Manual path so the socket can be bound to a chosen source
             // address before connect() picks an ephemeral port for it.
@@ -198,17 +218,31 @@ int main(int argc, char** argv) {
                 if (!bind_source(fd, source) ||
                     connect(fd, reinterpret_cast<struct sockaddr*>(&remote),
                             sizeof(remote)) < 0) {
+                    last_errno = errno;
                     error = "bind()/connect() from " + source + " failed: " +
                             std::strerror(errno);
                     close(fd);
                     fd = -1;
                 }
             } else {
+                last_errno = errno;
                 error = std::string("socket() failed: ") + std::strerror(errno);
             }
         }
 
         if (fd < 0) {
+            // Back off briefly and try again while the failure is only the
+            // server's accept queue being momentarily full.
+            if (is_transient(last_errno) && attempt < 200 && !g_stop) {
+                ++attempt;
+                ++retries;
+                struct timespec pause;
+                pause.tv_sec = 0;
+                pause.tv_nsec = 2 * 1000 * 1000;  // 2 ms
+                nanosleep(&pause, nullptr);
+                goto retry;
+            }
+
             std::printf(
                 "\nconn_gen: stopped after %zu established connections.\n"
                 "conn_gen: first failure at connection %ld: %s\n",
@@ -225,6 +259,10 @@ int main(int argc, char** argv) {
     }
 
     report(connections.size(), now_seconds() - started, fd_limit);
+    if (retries > 0) {
+        std::printf("conn_gen: %ld connect() retries (the server's accept "
+                    "queue filled; kern.ipc.soacceptqueue)\n", retries);
+    }
 
     struct rusage usage_info;
     if (getrusage(RUSAGE_SELF, &usage_info) == 0) {
