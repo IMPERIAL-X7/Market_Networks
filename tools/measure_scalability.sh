@@ -45,10 +45,30 @@ mkdir -p "$ROOT/report"
 # load a shared library, so nothing can be killed and the VM must be rebooted.
 # Targets are therefore capped below that ceiling unless FORCE=1 is set.
 
+# Two kernel limits bound this, and BOTH are consumed two-at-a-time because
+# each loopback connection has two endpoints on this machine:
+#
+#   kern.maxfiles       the system file table
+#   kern.ipc.maxsockets the socket structures themselves - a boot-time
+#                       tunable, so raising it needs /boot/loader.conf and a
+#                       reboot, not sysctl
+#
+# Exhausting either one stops the machine creating sockets, which means no new
+# ssh sessions and, for the file table, no new processes at all.
 MAXFILES=$(sysctl -n kern.maxfiles 2>/dev/null || echo 0)
+MAXSOCKETS=$(sysctl -n kern.ipc.maxsockets 2>/dev/null || echo 0)
+
+LIMIT=$MAXFILES
+if [ "$MAXSOCKETS" -gt 0 ] && [ "$MAXSOCKETS" -lt "$LIMIT" ]; then
+    LIMIT=$MAXSOCKETS
+    LIMIT_NAME=kern.ipc.maxsockets
+else
+    LIMIT_NAME=kern.maxfiles
+fi
+
 SAFE_MAX=0
-if [ "$MAXFILES" -gt 0 ]; then
-    SAFE_MAX=$(( (MAXFILES - 4000) / 2 ))
+if [ "$LIMIT" -gt 0 ]; then
+    SAFE_MAX=$(( (LIMIT - 4000) / 2 ))
 fi
 
 # conn_gen releases its connections after this many seconds even if this
@@ -82,9 +102,9 @@ sockbuf_kib()  { netstat -m 2>/dev/null | awk '/bytes allocated to network/ {spl
 clusters()     { netstat -m 2>/dev/null | awk '/mbuf clusters in use/ {print $1; exit}'; }
 
 echo "backend: $BACKEND   counts: $COUNTS"
-echo "limits:  kern.maxfiles=$(sysctl -n kern.maxfiles 2>/dev/null) \
-kern.maxfilesperproc=$(sysctl -n kern.maxfilesperproc 2>/dev/null) \
-ulimit -n=$(ulimit -n)"
+echo "limits:  kern.maxfiles=$MAXFILES kern.ipc.maxsockets=$MAXSOCKETS \
+kern.maxfilesperproc=$(sysctl -n kern.maxfilesperproc 2>/dev/null) ulimit -n=$(ulimit -n)"
+echo "binding: $LIMIT_NAME=$LIMIT  ->  safe max $SAFE_MAX connections"
 echo
 
 printf 'connections\testablished\trss_kib\tcpu_pct\tserver_fds\tsys_openfiles\tnet_bytes\tclusters\tbackend\n' > "$OUT"
@@ -92,10 +112,13 @@ printf 'connections\testablished\trss_kib\tcpu_pct\tserver_fds\tsys_openfiles\tn
 for target in $COUNTS; do
     if [ "$SAFE_MAX" -gt 0 ] && [ "$target" -gt "$SAFE_MAX" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "=== target $target: SKIPPED ==="
-        echo "  $target connections need $((target * 2)) system file entries," \
-             "but kern.maxfiles is $MAXFILES."
-        echo "  Exhausting it wedges the machine (no fork, no exec) until reboot."
-        echo "  Raise it first:  sysctl kern.maxfiles=250000 kern.maxfilesperproc=200000"
+        echo "  $target connections need $((target * 2)) entries, but" \
+             "$LIMIT_NAME is $LIMIT."
+        echo "  Exhausting it stops the machine creating sockets (no new ssh"
+        echo "  sessions), and exhausting kern.maxfiles stops it forking at all."
+        echo "  Raise both first:"
+        echo "    sysctl kern.maxfiles=300000 kern.maxfilesperproc=200000"
+        echo "    echo 'kern.ipc.maxsockets=\"300000\"' >> /boot/loader.conf   # needs a reboot"
         echo "  or re-run with FORCE=1 to try anyway."
         continue
     fi

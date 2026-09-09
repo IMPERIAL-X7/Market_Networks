@@ -1,0 +1,57 @@
+tcpdump capture for experiment 2
+host: FreeBSD exchange-vm 15.1-RELEASE-p3 FreeBSD 15.1-RELEASE-p3 releng/15.1-n283611-88e7371d9dc2 GENERIC amd64
+date: Thu Sep 10 00:47:18 IST 2026
+filter: 'port 5000' on lo0
+
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on lo0, link-type NULL (BSD loopback), snapshot length 262144 bytes
+2026-09-10 00:47:19.474017 IP 127.0.0.1.52895 > 127.0.0.1.5000: Flags [S], seq 2363901314, win 65535, options [mss 16344,nop,wscale 8,sackOK,TS val 279246520 ecr 0], length 0
+2026-09-10 00:47:19.474028 IP 127.0.0.1.5000 > 127.0.0.1.52895: Flags [R.], seq 0, ack 2363901315, win 0, length 0
+2026-09-10 00:47:19.574590 IP 127.0.0.1.41760 > 127.0.0.1.5000: Flags [S], seq 1485769993, win 65535, options [mss 16344,nop,wscale 8,sackOK,TS val 2970488710 ecr 0], length 0
+2026-09-10 00:47:19.574841 IP 127.0.0.1.5000 > 127.0.0.1.41760: Flags [S.], seq 3209962816, ack 1485769994, win 65535, options [mss 16344,nop,wscale 8,sackOK,TS val 194416264 ecr 2970488710], length 0
+2026-09-10 00:47:19.574868 IP 127.0.0.1.41760 > 127.0.0.1.5000: Flags [.], ack 3209962817, win 320, options [nop,nop,TS val 2970488710 ecr 194416264], length 0
+2026-09-10 00:47:19.575091 IP 127.0.0.1.41760 > 127.0.0.1.5000: Flags [R.], seq 1485769994, ack 3209962817, win 0, options [nop,nop,TS val 2970488710 ecr 194416264], length 0
+2026-09-10 00:47:19.575371 IP 127.0.0.1.10100 > 127.0.0.1.5000: Flags [S], seq 1234785280, win 65535, options [mss 16344,nop,wscale 8,sackOK,TS val 3708263188 ecr 0], length 0
+2026-09-10 00:47:19.575387 IP 127.0.0.1.5000 > 127.0.0.1.10100: Flags [S.], seq 2286082423, ack 1234785281, win 65535, options [mss 16344,nop,wscale 8,sackOK,TS val 1066808079 ecr 3708263188], length 0
+2026-09-10 00:47:19.575410 IP 127.0.0.1.10100 > 127.0.0.1.5000: Flags [.], ack 2286082424, win 320, options [nop,nop,TS val 3708263188 ecr 1066808079], length 0
+2026-09-10 00:47:29.576147 IP 127.0.0.1.10100 > 127.0.0.1.5000: Flags [F.], seq 1234785281, ack 2286082424, win 320, options [nop,nop,TS val 3708273190 ecr 1066808079], length 0
+2026-09-10 00:47:29.576296 IP 127.0.0.1.5000 > 127.0.0.1.10100: Flags [.], ack 1234785282, win 320, options [nop,nop,TS val 1066818081 ecr 3708273190], length 0
+2026-09-10 00:47:29.576795 IP 127.0.0.1.5000 > 127.0.0.1.10100: Flags [F.], seq 2286082424, ack 1234785282, win 320, options [nop,nop,TS val 1066818081 ecr 3708273190], length 0
+2026-09-10 00:47:29.577031 IP 127.0.0.1.10100 > 127.0.0.1.5000: Flags [.], ack 2286082425, win 320, options [nop,nop,TS val 3708273190 ecr 1066818081], length 0
+
+13 packets captured
+13 packets received by filter
+0 packets dropped by kernel
+
+===== server log =====
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+Exchange Server is listening.
+[+] connection accepted: fd 5 from 127.0.0.1:41760 (1 clients)
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients)
+[+] connection accepted: fd 5 from 127.0.0.1:10100 (1 clients)
+[-] connection closed: fd 5 - peer closed its sending direction (FIN) (0 clients)
+
+===== harness output =====
+=== Experiment 2: Observing TCP Connection States ===
+
+Started Exchange Server (PID 6170).
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+Exchange Server is listening.
+
+[+] connection accepted: fd 5 from 127.0.0.1:41760 (1 clients)
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients)
+[+] connection accepted: fd 5 from 127.0.0.1:10100 (1 clients)
+Experiment client: connected from 127.0.0.1:10100
+
+Phase 1: the client is connected and idle.
+Investigate the connection now.
+
+Phase 2: closing the client connection.
+Investigate the connection again.
+
+The Exchange Server will remain running for 15 seconds.
+[-] connection closed: fd 5 - peer closed its sending direction (FIN) (0 clients)
+
+Experiment finished.
+Stopping Exchange Server...
+Exchange Server shutting down; closing 0 connection(s).

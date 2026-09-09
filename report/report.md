@@ -12,9 +12,10 @@ Every observation below was taken on that VM. The raw command output behind
 each one is in `report/captures/`, one file per experiment; the screenshots are
 terminal captures of those same commands.
 
-> **Remaining before submission:** the `tcpdump` captures in Experiments 2, 6
-> and 8 need root and are marked ⚠ below. Everything else is recorded.
-> Export this file to `report.pdf`.
+> **Remaining before submission:** replace each "Deliverable" note with the
+> corresponding terminal screenshot, and export this file to `report.pdf`.
+> `sh tools/show_evidence.sh <n>` prints exactly the output each screenshot
+> should show.
 
 ---
 
@@ -224,11 +225,28 @@ over loopback and FreeBSD applies `msl_local` (10 ms) rather than the 30 s
 `msl`; over a real network the same connection would sit in `TIME_WAIT` for
 about a minute.
 
-**Deliverable.** Screenshots of the phase 1 and phase 2 `netstat` output and of
-the tight-sampling run above —
-`report/captures/capture_exp2.txt`, `report/captures/timewait_observation.txt`.
-⚠ Optionally add a `tcpdump -i lo0 -n port 5000` capture (needs root) showing
-`SYN` / `SYN,ACK` / `ACK` and the `FIN` / `ACK` / `FIN` / `ACK` exchange.
+The packet trace shows both ends of the lifetime. The handshake:
+
+```
+00:47:19.575371 IP 127.0.0.1.10100 > 127.0.0.1.5000: Flags [S],  seq 1234785280, win 65535
+00:47:19.575387 IP 127.0.0.1.5000 > 127.0.0.1.10100: Flags [S.], seq 2286082423, ack 1234785281
+```
+
+then exactly ten seconds of silence — the idle period — and the close:
+
+```
+00:47:29.576147 IP 127.0.0.1.10100 > 127.0.0.1.5000: Flags [F.], seq 1234785281, ack 2286082424
+00:47:29.576795 IP 127.0.0.1.5000 > 127.0.0.1.10100: Flags [F.], seq 2286082424, ack 1234785282
+```
+
+The ten-second gap between the handshake and the `FIN` contains no packets at
+all, which is the direct evidence that an established, idle TCP connection
+costs nothing on the wire.
+
+**Deliverable.** Screenshots of the phase 1 and phase 2 `netstat` output, the
+tight-sampling run, and the `tcpdump` trace —
+`report/captures/capture_exp2.txt`, `timewait_observation.txt`,
+`tcpdump_exp2.txt`.
 
 ---
 
@@ -420,8 +438,7 @@ timeout and closes, which makes the kernel send `RST` instead of `FIN`.
 
 ```sh
 netstat -an -p tcp | grep 5000
-# ⚠ needs root:
-tcpdump -i lo0 -n 'port 5000 and (tcp[tcpflags] & (tcp-fin|tcp-rst)) != 0'
+su -m root -c 'sh tools/capture_tcpdump.sh 6'     # tcpdump needs root
 ```
 
 **Observation.** The two halves are cleanly distinguished by how the server's
@@ -442,6 +459,21 @@ Part B (abortive, RST):
 | Queued data | still delivered before the close completes | discarded |
 | States | `FIN_WAIT_2` / `CLOSE_WAIT`, then a brief `TIME_WAIT` | none; the connection is destroyed at once |
 
+The packet trace settles it. Part A, the client on port 54732:
+
+```
+00:46:21.963213 IP 127.0.0.1.54732 > 127.0.0.1.5000: Flags [F.], seq 3269099266, ack 935261130, win 320
+00:46:21.963525 IP 127.0.0.1.5000 > 127.0.0.1.54732: Flags [F.], seq 935261130, ack 3269099267, win 320
+```
+
+a `FIN` in each direction, each acknowledged. Part B, the client on port 23962:
+
+```
+00:46:31.964941 IP 127.0.0.1.23962 > 127.0.0.1.5000: Flags [R.], seq 3650856300, ack 1080036031, win 0
+```
+
+a single `RST`, with `win 0`, and nothing after it.
+
 **Answer.** The orderly shutdown is a negotiated, per-direction close: the
 `FIN` is acknowledged, data already in flight is still delivered, the
 application sees a clean end-of-stream in the form of `recv()` returning 0, and
@@ -453,10 +485,10 @@ In both cases the server frees the session and carries on serving other
 clients; the difference is visible to the application only in *how* the read
 ended — a zero-length return versus an error.
 
-**Deliverable.** Screenshot of the two server log lines above with the
-`netstat` state at each stage — `report/captures/capture_exp6.txt`.
-⚠ Add the `tcpdump` capture (needs root) showing `FIN`/`ACK` in Part A and a
-lone `RST` in Part B.
+**Deliverable.** Screenshot of the `tcpdump` trace showing `[F.]` in each
+direction for Part A against the lone `[R.]` for Part B, beside the two server
+log lines — `report/captures/tcpdump_exp6.txt`,
+`report/captures/capture_exp6.txt`.
 
 ---
 
@@ -558,9 +590,8 @@ a fixed schedule.
 **Commands.**
 
 ```sh
-python3 tools/capture_exp8.py        # samples sockstat/netstat continuously
-# ⚠ needs root:
-tcpdump -i lo0 -n -S port 5000
+python3 tools/capture_exp8.py                     # samples connections continuously
+su -m root -c 'sh tools/capture_tcpdump.sh 8'     # tcpdump needs root
 ```
 
 **Observation.** Before the kill, five server sockets exist — the listening
@@ -595,6 +626,15 @@ have disappeared from `netstat`; the three surviving connections are still
 [-] connection closed: fd 8 - peer closed its sending direction (FIN) (3 clients remain)
 ```
 
+The packet trace confirms it at the wire level. At the moment of the kill, the
+helper's connection (port 31973) closes with a `FIN` in each direction, exactly
+like a voluntary close — there is no `RST`:
+
+```
+00:47:59.314797 IP 127.0.0.1.31973 > 127.0.0.1.5000: Flags [F.], seq 954488989, ack 952952094
+00:47:59.315062 IP 127.0.0.1.5000 > 127.0.0.1.31973: Flags [F.], seq 952952094, ack 954488990
+```
+
 **Answer.** `SIGKILL` gives the process no chance to run any shutdown code, but
 the kernel still closes its descriptors on its behalf, and that close performs
 an ordinary TCP shutdown: a **`FIN`** is sent, and the server's `recv()` returns
@@ -622,11 +662,9 @@ retransmissions timed out — or never, had the connection been idle with
 keepalives disabled.
 
 **Deliverable.** Screenshots of `sockstat` immediately before and after the
-kill, showing the helper process and its connection present and then gone while
-the others remain, plus the server log line —
-`report/captures/capture_exp8.txt`.
-⚠ Add the `tcpdump` capture (needs root) showing the `FIN` at the moment of the
-kill.
+kill — showing the helper process and its connection present, then gone, while
+the others remain — the server log line, and the `tcpdump` `FIN` —
+`report/captures/capture_exp8.txt`, `report/captures/tcpdump_exp8.txt`.
 
 ---
 
