@@ -65,9 +65,16 @@ mkdir -p "$DEST"
 # Ship sources and everything needed to build and run; no build products, so
 # the submission is reproducible from scratch.
 cp -R server client src tests tools Makefile README.md "$DEST/"
+[ -f experiment.py ] && cp experiment.py "$DEST/"
+
+# report.pdf belongs at the archive root; the raw command output behind each
+# experiment's observations travels with it as supporting evidence.
 [ -f report/report.pdf ] && cp report/report.pdf "$DEST/report.pdf"
 [ -f report/report.md ] && cp report/report.md "$DEST/report.md"
-[ -f experiment.py ] && cp experiment.py "$DEST/"
+if [ -d report/captures ]; then
+    mkdir -p "$DEST/report"
+    cp -R report/captures "$DEST/report/"
+fi
 
 # The launchers build on demand, so the archive ships sources only: no build
 # products, and nothing compiled for the wrong architecture.

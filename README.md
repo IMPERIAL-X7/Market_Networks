@@ -192,34 +192,54 @@ reading, and a client that stalls mid-message.
 per-connection cost can be measured:
 
 ```sh
-./bin/conn_gen 127.0.0.1 5000 10000
+./bin/conn_gen 127.0.0.1 5000 10000 --hold-seconds 120
 ./bin/conn_gen 127.0.0.1 5000 70000 --src-ips 127.0.0.1,127.0.0.2,127.0.0.3
 ```
 
 It reports progress, the descriptor limit it is running under, and, if it
 cannot reach the target, the connection number at which it first failed and
-why. It then holds the connections open until interrupted so the server-side
-measurements can be taken.
+why. `--hold-seconds N` makes it release everything after N seconds; prefer it
+in scripts, for the reason in the warning below.
 
-Beyond roughly 60,000 connections a single source address runs out of ephemeral
-ports, because every connection needs a distinct
-`(source ip, source port, destination ip, destination port)` tuple. Add
-loopback aliases and pass them with `--src-ips`:
+`tools/measure_scalability.sh` drives the whole sweep and writes
+`report/scalability.tsv`:
 
 ```sh
-ifconfig lo0 alias 127.0.0.2/8
-ifconfig lo0 alias 127.0.0.3/8
-sysctl net.inet.ip.portrange.first=10000
+sh tools/measure_scalability.sh 127.0.0.1 5000 5000 10000 20000 30000
+EXCHANGE_BACKEND=poll sh tools/measure_scalability.sh 127.0.0.1 5000 10000 30000
 ```
 
-Both the server and `conn_gen` raise `RLIMIT_NOFILE` to the hard limit at
-startup; the hard limit itself and the system-wide maximum still need raising
-for the larger runs:
+> **Warning — this can wedge the machine.** Both endpoints of a loopback
+> connection live on the same host, so **each connection consumes two
+> system-wide file entries**. Driving `kern.openfiles` to `kern.maxfiles` does
+> not merely fail the next `connect()`: the system can then no longer fork a
+> process or even load a shared library, so nothing can be killed from inside
+> and only a reboot recovers it. On a stock FreeBSD VM with
+> `kern.maxfiles = 64302` that ceiling is around **32,000 connections**.
+>
+> `measure_scalability.sh` refuses targets above `(kern.maxfiles - 4000) / 2`
+> unless `FORCE=1` is set, and passes `--hold-seconds` so a run releases its
+> connections even if the script is killed.
+
+### Going beyond ~32,000 connections
+
+Raise the limits first (all need root):
 
 ```sh
-sysctl kern.maxfiles=200000
-sysctl kern.maxfilesperproc=200000
+sysctl kern.maxfiles=250000 kern.maxfilesperproc=200000
+sysctl kern.ipc.soacceptqueue=4096     # the accept queue is 128 by default,
+                                       # which throttles connection setup
+ifconfig lo0 alias 127.0.0.2/8         # each source address has its own
+ifconfig lo0 alias 127.0.0.3/8         # ephemeral port range
 ```
 
-Measurements are taken with `sockstat`, `netstat -m`, `procstat -f`,
-`sysctl kern.openfiles`, and `top`; the results and analysis are in the report.
+Then pass the extra source addresses, since all connections from one address to
+one `(dest ip, dest port)` need distinct ephemeral ports:
+
+```sh
+SRC_IPS=127.0.0.1,127.0.0.2,127.0.0.3 \
+    sh tools/measure_scalability.sh 127.0.0.1 5000 50000 70000
+```
+
+Measurements are taken with `netstat`, `netstat -m`, `procstat -f`, `ps`, and
+`sysctl kern.openfiles`; the results and analysis are in the report.
