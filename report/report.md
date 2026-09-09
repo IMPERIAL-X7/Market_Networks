@@ -708,6 +708,32 @@ simultaneously established and idle. Raw data: `report/captures/`.
 | 30,000 | 30,005 | 17,048 | 0.2 | 30,008 | 60,087 | 1,424 K |
 | 40,000 | **30,494** | — | — | — | ~64,300 (max) | 1,424 K |
 
+At the target of 40,000 the run stops with `ENFILE`. Raising the descriptor
+limits and repeating the sweep moves the failure but not the ceiling:
+
+```sh
+sysctl kern.maxfiles=250000 kern.maxfilesperproc=200000
+sysctl kern.ipc.soacceptqueue=4096
+ifconfig lo0 alias 127.0.0.2/8 ; ifconfig lo0 alias 127.0.0.3/8
+SRC_IPS=127.0.0.1,127.0.0.2,127.0.0.3 sh tools/measure_scalability.sh 127.0.0.1 5000 40000 50000 60000 70000
+```
+
+*After raising `kern.maxfiles` to 250,000 and `RLIMIT_NOFILE` to 200,000:*
+
+| Target | Established | Server RSS (KiB) | Server CPU % | Server open fds | System open files |
+|---:|---:|---:|---:|---:|---:|
+| 40,000 | 32,068 | 17,808 | 0.3 | 32,073 | 64,218 |
+| 50,000 | 32,122 | 17,804 | 0.2 | 32,128 | 64,367 |
+| 60,000 | 32,107 | 17,372 | 0.2 | 32,109 | 64,290 |
+| 70,000 | 32,034 | 17,788 | 0.0 | 32,038 | 64,148 |
+
+Four independent runs converge on the same figure, ~32,100, and all four fail
+the same way:
+
+```
+conn_gen: first failure at connection 32102: socket() failed: No buffer space available
+```
+
 *Same sweep with `EXCHANGE_BACKEND=poll`:*
 
 | Idle connections | Established | Server RSS (KiB) | Server CPU % | Server open fds | System open files |
@@ -725,26 +751,50 @@ socket buffers on demand.
 
 **1. Is the server able to maintain all requested connections at each count?**
 Yes up to 30,000, which it holds exactly (the small excess — 30,005 — is the
-sweep's own probe connections). At a target of 40,000 it fails: `conn_gen`
-stops at **30,494** with
+sweep's own probe connections). Beyond that it cannot, and the ceiling is
+**~32,100 connections** on this VM regardless of the target requested.
 
-```
-conn_gen: first failure at connection 30495: socket() failed: Too many open files in system
-```
+The failure is never the server's. In every run the server had already accepted
+every connection offered and was still serving them; it is the *client's*
+`socket()` call that fails, and the errno says which kernel resource ran out:
 
-That is `ENFILE`, a system-wide limit, reached on the *client's* `socket()`
-call. It is not a failure of the server: the server had already accepted all
-30,494 and was still serving them.
+| Configuration | First failure | errno |
+|---|---:|---|
+| stock (`kern.maxfiles` = 64,302) | connection 30,495 | `ENFILE` — "Too many open files in system" |
+| `kern.maxfiles` raised to 250,000 | connection ~32,100 | `ENOBUFS` — "No buffer space available" |
+
+Raising the descriptor limits moved the error but barely moved the ceiling,
+which is the interesting part — see below.
 
 **2. What is the first significant bottleneck?**
 Two distinct limits appear, and they constrain different things.
 
-The limit on the **number** of connections is the **system-wide file
-descriptor table**. `kern.maxfiles` is 64,302, but the ceiling lands at ~30,500
-because both endpoints of every connection live in this VM and each costs a
-file entry — the `sys_openfiles` column, tracking 2N almost exactly, is the
-direct evidence. The per-process limit (`kern.maxfilesperproc` = 57,870) is
-never reached, so this is a limit of the machine, not of the server process.
+The limit on the **number** of connections is **two entries per connection
+against a 64,302-entry kernel table** — and there are two such tables, which is
+why raising one alone achieved nothing.
+
+At stock settings the binding table is the system file table,
+`kern.maxfiles` = 64,302, and the run fails with `ENFILE` at 30,494. Raising
+that to 250,000 exposes the one behind it: `kern.ipc.maxsockets`, which is
+**also 64,302**, because FreeBSD derives it from `kern.maxfiles` *at boot*. The
+run then fails with `ENOBUFS` at ~32,100 — almost exactly 64,302 / 2 = 32,151,
+the point at which the socket table is full. Both endpoints of every loopback
+connection live in this VM, so each connection costs two entries in each table;
+the `sys_openfiles` column, tracking 2N almost exactly, is the direct evidence.
+
+`kern.ipc.maxsockets` is a **boot-time tunable**, not a runtime `sysctl`, so
+raising it requires `/boot/loader.conf` and a reboot:
+
+```sh
+# /boot/loader.conf
+kern.maxfiles="300000"
+kern.ipc.maxsockets="300000"
+```
+
+The per-process descriptor limit (`kern.maxfilesperproc`, raised to 200,000) is
+never reached, so at no point is this a limit on the server process — it is a
+limit of the machine, and specifically one made twice as tight by running both
+ends of every connection on it.
 
 The limit on the **rate** of connection setup is the listening socket's accept
 queue, `kern.ipc.soacceptqueue`, which is **128** by default. `conn_gen`
@@ -812,11 +862,17 @@ scale, and the more idle the connections, the better that trade looks. `poll`
 remains the reasonable choice only at small connection counts, which is why it
 is kept as a runtime option rather than removed.
 
-**Reaching 70,000 connections.** It cannot be done with this VM's stock
-settings; the following are needed, all requiring root:
+**Reaching 70,000 connections.** It was not reached: the measured ceiling is
+~32,100, and targets of 40,000 through 70,000 all stop there. Getting past it
+needs the boot-time socket table raised, which the runtime sysctls below cannot
+do on their own:
 
 ```sh
-sysctl kern.maxfiles=250000            # two file entries per loopback connection
+# /boot/loader.conf - needs a reboot, this is the one that actually binds
+kern.maxfiles="300000"
+kern.ipc.maxsockets="300000"
+
+# runtime, after the reboot
 sysctl kern.maxfilesperproc=200000
 sysctl kern.ipc.soacceptqueue=4096     # fewer connect() retries during setup
 ifconfig lo0 alias 127.0.0.2/8         # each source address has its own
@@ -826,27 +882,36 @@ SRC_IPS=127.0.0.1,127.0.0.2,127.0.0.3 \
     sh tools/measure_scalability.sh 127.0.0.1 5000 50000 60000 70000
 ```
 
-Extrapolating the measured 445 bytes per connection, 70,000 connections would
-need roughly 31 MB of server RSS — comfortable within 2 GB. The descriptor
-table, not memory, is what has to be raised.
+Nothing in the measurements suggests the server itself would struggle at that
+scale. Extrapolating the measured 445 bytes per connection, 70,000 connections
+would need roughly 31 MB of server RSS, and CPU under `kqueue` was still 0.0%
+at 32,000. The obstacle is entirely the size of two kernel tables, on a VM that
+has to hold both ends of every connection.
 
-> **A warning worth recording.** The 40,000-connection attempt drove
-> `kern.openfiles` to `kern.maxfiles`, and the consequence was not a failed
-> `connect()` but an unusable machine: with the file table full, no process
-> could be forked and not even `/bin/sh` could load its shared libraries, so
-> nothing could be killed from inside and the VM had to be rebooted.
-> `tools/measure_scalability.sh` now refuses targets above
-> `(kern.maxfiles - 4000) / 2` unless `FORCE=1`, and `conn_gen --hold-seconds`
-> releases the connections even if the controlling script dies.
+> **A warning worth recording.** Exhausting either table takes the whole
+> machine with it, not just the next `connect()`.
+>
+> Filling `kern.maxfiles` left the VM unable to fork a process or even load a
+> shared library — `/bin/sh` itself would not start, so nothing could be killed
+> from inside and it had to be rebooted. Filling `kern.ipc.maxsockets` is
+> milder but still locking: no process can create a socket, so no new `ssh`
+> session can be established, and even `tail` failed with
+> `unable to init casper: No buffer space available`.
+>
+> `tools/measure_scalability.sh` now takes the smaller of the two tables,
+> refuses targets above `(limit - 4000) / 2` unless `FORCE=1`, and passes
+> `conn_gen --hold-seconds` so a run releases its connections even if the
+> controlling script is killed.
 
 **Bonus deliverables checklist.**
 
 - [x] Client-generation program: `src/tools/conn_gen.cpp` (`bin/conn_gen`).
 - [x] Completed resource-measurement table (above), for both I/O backends.
-- [ ] Screenshots of the FreeBSD commands and outputs at the required
-      connection counts. The measurements themselves are recorded in
-      `report/captures/scalability_kqueue.tsv` and `scalability_poll.tsv`;
-      re-run `tools/measure_scalability.sh` and screenshot the terminal, or
-      capture `netstat -an -p tcp | grep -c 5000`, `procstat -f <pid>`,
-      `sysctl kern.openfiles` and `ps -o rss,%cpu` while a run is holding.
+- [ ] Screenshots at the required connection counts. The measurements are
+      recorded in `report/captures/scalability_kqueue.tsv`,
+      `scalability_poll.tsv` and `scalability_70k.tsv`; re-run
+      `tools/measure_scalability.sh` and screenshot the terminal, or capture
+      `netstat -an -p tcp | grep -c 5000`, `procstat -f <pid>`,
+      `sysctl kern.openfiles kern.ipc.numopensockets` and `ps -o rss,%cpu`
+      while a run is holding.
 - [x] Analysis answering questions 1–5 (above).

@@ -1,0 +1,15 @@
+conn_gen: target 70000 connections to 127.0.0.1:5000, RLIMIT_NOFILE soft limit 200000
+established 5000 connections in 34.94s (143 conn/s), RLIMIT_NOFILE soft limit 200000
+established 10000 connections in 72.04s (139 conn/s), RLIMIT_NOFILE soft limit 200000
+established 15000 connections in 72.09s (208 conn/s), RLIMIT_NOFILE soft limit 200000
+established 20000 connections in 72.13s (277 conn/s), RLIMIT_NOFILE soft limit 200000
+established 25000 connections in 72.17s (346 conn/s), RLIMIT_NOFILE soft limit 200000
+established 30000 connections in 72.21s (415 conn/s), RLIMIT_NOFILE soft limit 200000
+
+conn_gen: stopped after 32030 established connections.
+conn_gen: first failure at connection 32031: socket() failed: No buffer space available
+established 32030 connections in 72.22s (443 conn/s), RLIMIT_NOFILE soft limit 200000
+conn_gen: own max RSS 3620 KiB, user 0.04s, system 0.23s
+conn_gen: pid 6883. Take the server-side measurements now.
+conn_gen: holding for 180 seconds.
+conn_gen: closing 32030 connections.

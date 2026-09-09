@@ -1,14 +1,15 @@
-conn_gen: target 40000 connections to 127.0.0.1:5000, RLIMIT_NOFILE soft limit 57870
-established 5000 connections in 74.24s (67 conn/s), RLIMIT_NOFILE soft limit 57870
-established 10000 connections in 74.28s (135 conn/s), RLIMIT_NOFILE soft limit 57870
-established 15000 connections in 74.32s (202 conn/s), RLIMIT_NOFILE soft limit 57870
-established 20000 connections in 74.36s (269 conn/s), RLIMIT_NOFILE soft limit 57870
-established 25000 connections in 74.40s (336 conn/s), RLIMIT_NOFILE soft limit 57870
-established 30000 connections in 74.43s (403 conn/s), RLIMIT_NOFILE soft limit 57870
+conn_gen: target 40000 connections to 127.0.0.1:5000, RLIMIT_NOFILE soft limit 200000
+established 5000 connections in 0.05s (102008 conn/s), RLIMIT_NOFILE soft limit 200000
+established 10000 connections in 0.10s (104922 conn/s), RLIMIT_NOFILE soft limit 200000
+established 15000 connections in 0.14s (107858 conn/s), RLIMIT_NOFILE soft limit 200000
+established 20000 connections in 0.19s (108071 conn/s), RLIMIT_NOFILE soft limit 200000
+established 25000 connections in 0.24s (106300 conn/s), RLIMIT_NOFILE soft limit 200000
+established 30000 connections in 0.30s (100418 conn/s), RLIMIT_NOFILE soft limit 200000
 
-conn_gen: stopped after 30494 established connections.
-conn_gen: first failure at connection 30495: socket() failed: Too many open files in system
-established 30494 connections in 74.44s (410 conn/s), RLIMIT_NOFILE soft limit 57870
-conn_gen: own max RSS 3596 KiB, user 0.01s, system 0.16s
-conn_gen: pid 5487. Take the server-side measurements now.
-conn_gen: closing 30494 connections.
+conn_gen: stopped after 32065 established connections.
+conn_gen: first failure at connection 32066: socket() failed: No buffer space available
+established 32065 connections in 0.33s (98559 conn/s), RLIMIT_NOFILE soft limit 200000
+conn_gen: own max RSS 3624 KiB, user 0.03s, system 0.16s
+conn_gen: pid 6248. Take the server-side measurements now.
+conn_gen: holding for 180 seconds.
+conn_gen: closing 32065 connections.
