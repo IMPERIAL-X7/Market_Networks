@@ -1,5 +1,7 @@
 #include "tcp_server.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -22,10 +24,13 @@ bool TCPServer::start(int backlog) {
     return fd_ >= 0;
 }
 
-int TCPServer::accept_connection(bool* again) {
+int TCPServer::accept_connection(bool* again, std::string* peer) {
     if (again) *again = false;
 
-    int client_fd = accept(fd_, nullptr, nullptr);
+    struct sockaddr_in address;
+    socklen_t address_len = sizeof(address);
+    int client_fd = accept(fd_, reinterpret_cast<struct sockaddr*>(&address),
+                           &address_len);
     if (client_fd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             if (again) *again = true;
@@ -46,6 +51,16 @@ int TCPServer::accept_connection(bool* again) {
         return -1;
     }
     net::set_tcp_nodelay(client_fd);
+
+    if (peer != nullptr) {
+        char text[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &address.sin_addr, text, sizeof(text))) {
+            *peer = std::string(text) + ":" +
+                    std::to_string(ntohs(address.sin_port));
+        } else {
+            *peer = "<unknown>";
+        }
+    }
 
     return client_fd;
 }

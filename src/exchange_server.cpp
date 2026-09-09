@@ -149,7 +149,8 @@ private:
         // wakeup can correspond to several completed handshakes.
         for (;;) {
             bool again = false;
-            int fd = listener_.accept_connection(&again);
+            std::string peer;
+            int fd = listener_.accept_connection(&again, &peer);
             if (fd < 0) {
                 if (again) return;
                 if (!listener_.error().empty()) {
@@ -160,7 +161,7 @@ private:
             }
 
             ClientSession session(fd);
-            session.peer = net::peer_name(fd);
+            session.peer = peer;
             sessions_.emplace(fd, std::move(session));
 
             if (!loop_.add(fd, true, false)) {

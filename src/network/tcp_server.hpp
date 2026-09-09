@@ -24,7 +24,9 @@ public:
     // Returns -1 when the backlog is momentarily empty (EAGAIN) or the
     // connection died before it could be accepted; `again` distinguishes
     // "nothing left to accept" from a real error.
-    int accept_connection(bool* again);
+    // `peer` receives the client's "ip:port" as reported by accept() itself,
+    // which stays available even if the connection is reset immediately after.
+    int accept_connection(bool* again, std::string* peer);
 
     int fd() const { return fd_; }
     int port() const { return port_; }
