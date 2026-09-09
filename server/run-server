@@ -1,0 +1,13 @@
+#!/bin/sh
+# Launches the Exchange Server. Arguments are passed straight through, so the
+# experiment harness can call: ./server/run-server 127.0.0.1 5000
+set -e
+here=$(dirname "$0")
+root=$(cd "$here/.." && pwd)
+
+# Build on first use so the submission works from a clean checkout.
+if [ ! -x "$root/bin/exchange_server" ]; then
+    make -C "$root" >&2
+fi
+
+exec "$root/bin/exchange_server" "$@"

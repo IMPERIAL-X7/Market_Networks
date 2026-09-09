@@ -1,66 +1,99 @@
 #include "order_book.hpp"
+
 #include <algorithm>
 
-int OrderBook::add_order(int client_fd, const std::string& inst, Side side, long qty, long price, std::vector<TradeExecution>& executions) {
-    int order_id = next_order_id++;
-    Order new_order{order_id, client_fd, inst, side, qty, price};
+void OrderBook::erase_at(long order_id, const Location& location) {
+    location.queue->erase(location.it);
+    index_.erase(order_id);
+}
 
-    auto& opposites = (side == Side::BUY) ? sell_orders[inst] : buy_orders[inst];
-    
-    auto it = opposites.begin();
-    while (it != opposites.end() && new_order.quantity > 0) {
-        // Matches ONLY if the price is exactly identical
-        if (it->price == new_order.price) {
-            long traded_qty = std::min(new_order.quantity, it->quantity);
-            
-            executions.push_back({
-                (side == Side::BUY) ? client_fd : it->client_fd,
-                (side == Side::BUY) ? it->client_fd : client_fd,
-                inst, traded_qty, price
-            });
+long OrderBook::add_order(int owner_fd, const std::string& instrument,
+                          Side side, long quantity, long price,
+                          std::vector<TradeExecution>& executions) {
+    const long order_id = next_order_id_++;
+    long remaining = quantity;
 
-            new_order.quantity -= traded_qty;
-            it->quantity -= traded_qty;
+    std::list<Order>& opposite =
+        (side == Side::BUY) ? sells_[instrument] : buys_[instrument];
 
-            // Remove fully executed opposite orders
-            if (it->quantity == 0) {
-                order_pointers.erase(it->id);
-                it = opposites.erase(it);
-            } else {
-                ++it; // Move to next order if the current one still has volume
-            }
-        } else {
+    auto it = opposite.begin();
+    while (it != opposite.end() && remaining > 0) {
+        if (it->price != price) {
             ++it;
+            continue;
+        }
+
+        const long traded = std::min(remaining, it->quantity);
+
+        TradeExecution execution;
+        execution.buyer_fd = (side == Side::BUY) ? owner_fd : it->owner_fd;
+        execution.seller_fd = (side == Side::BUY) ? it->owner_fd : owner_fd;
+        execution.instrument = instrument;
+        execution.quantity = traded;
+        execution.price = price;
+        executions.push_back(execution);
+
+        remaining -= traded;
+        it->quantity -= traded;
+
+        if (it->quantity == 0) {
+            index_.erase(it->id);
+            it = opposite.erase(it);
+        } else {
+            ++it;  // partially filled resting order keeps its queue position
         }
     }
 
-    // If the new order wasn't fully filled, place it in the book
-    if (new_order.quantity > 0) {
-        auto& sames = (side == Side::BUY) ? buy_orders[inst] : sell_orders[inst];
-        sames.push_back(new_order);
-        
-        // Grab an iterator to the newly inserted element
-        auto inserted_it = sames.end();
-        --inserted_it;
-        order_pointers[order_id] = inserted_it;
+    // Whatever could not be matched rests in the book and stays cancellable.
+    if (remaining > 0) {
+        std::list<Order>& own =
+            (side == Side::BUY) ? buys_[instrument] : sells_[instrument];
+        Order order;
+        order.id = order_id;
+        order.owner_fd = owner_fd;
+        order.instrument = instrument;
+        order.side = side;
+        order.quantity = remaining;
+        order.price = price;
+        own.push_back(order);
+
+        Location location;
+        location.queue = &own;
+        location.it = std::prev(own.end());
+        index_[order_id] = location;
     }
 
     return order_id;
 }
 
-bool OrderBook::cancel_order(int order_id) {
-    auto it = order_pointers.find(order_id);
-    if (it == order_pointers.end()) return false;
-    
-    auto list_it = it->second;
-    const std::string& inst = list_it->instrument;
-    
-    if (list_it->side == Side::BUY) {
-        buy_orders[inst].erase(list_it);
-    } else {
-        sell_orders[inst].erase(list_it);
+bool OrderBook::cancel_order(long order_id, int requester_fd,
+                             std::string& error) {
+    auto it = index_.find(order_id);
+    if (it == index_.end()) {
+        // Covers unknown ids as well as orders that were fully executed or
+        // already cancelled, which the protocol treats the same way.
+        error = "No such order with unfilled quantity: " +
+                std::to_string(order_id);
+        return false;
     }
-    
-    order_pointers.erase(it);
+
+    if (it->second.it->owner_fd != requester_fd) {
+        error = "Order " + std::to_string(order_id) +
+                " belongs to another trader";
+        return false;
+    }
+
+    erase_at(order_id, it->second);
     return true;
+}
+
+void OrderBook::remove_orders_of(int owner_fd) {
+    for (auto it = index_.begin(); it != index_.end();) {
+        if (it->second.it->owner_fd == owner_fd) {
+            it->second.queue->erase(it->second.it);
+            it = index_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }

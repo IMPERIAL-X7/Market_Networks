@@ -1,0 +1,11 @@
+#!/bin/sh
+# Launches a Trader Client: ./client/run-trader 127.0.0.1 5000 alice
+set -e
+here=$(dirname "$0")
+root=$(cd "$here/.." && pwd)
+
+if [ ! -x "$root/bin/trader_client" ]; then
+    make -C "$root" >&2
+fi
+
+exec "$root/bin/trader_client" "$@"

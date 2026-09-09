@@ -1,44 +1,58 @@
-#include "network/tcp_client.hpp"
-#include <iostream>
-#include <thread>
-#include <atomic>
+// The Socket Exchange - Trader Client.
+//
+// usage: trader_client [host] [port] [username]
+//
+// Submits and cancels orders, and receives both direct responses and the
+// asynchronous BOUGHT / SOLD notifications produced when a resting order is
+// matched later by someone else's order.
 
-std::atomic<bool> running{true};
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 
-void receive_loop(TCPClient* client) {
-    while (running) {
-        std::string msg = client->receive_message();
-        if (msg.empty()) {
-            std::cout << "Server disconnected.\n";
-            running = false;
-            break;
-        }
-        std::cout << msg; 
-    }
+#include "client_shell.hpp"
+
+namespace {
+
+void usage(const char* program) {
+    std::fprintf(stderr,
+                 "usage: %s [host] [port] [username]\n"
+                 "\n"
+                 "  host, port   Exchange Server address (default 127.0.0.1 "
+                 "5000)\n"
+                 "  username     if given, LOGIN <username> is sent on "
+                 "connect\n",
+                 program);
 }
 
-int main() {
-    TCPClient client("127.0.0.1", 5000);
-    
-    if (!client.connect_to_server()) {
-        std::cerr << "Failed to connect to server.\n";
-        return 1;
+}  // namespace
+
+int main(int argc, char** argv) {
+    ClientShellOptions options;
+    options.host = "127.0.0.1";
+    options.port = 5000;
+    options.role_name = "Trader Client";
+    options.help_text =
+        "Commands: LOGIN <username> | BUY <instrument> <qty> <price> | "
+        "SELL <instrument> <qty> <price> | CANCEL <order_id> | QUIT\n"
+        "Instruments: JNST, IMCT.  Lines you type are sent as-is; server "
+        "messages are printed with '<<<'.";
+
+    if (argc > 4) {
+        usage(argv[0]);
+        return 2;
+    }
+    if (argc >= 2) options.host = argv[1];
+    if (argc >= 3) {
+        options.port = std::atoi(argv[2]);
+        if (options.port <= 0 || options.port > 65535) {
+            std::fprintf(stderr, "trader_client: invalid port '%s'\n", argv[2]);
+            return 2;
+        }
+    }
+    if (argc >= 4) {
+        options.initial_commands.push_back(std::string("LOGIN ") + argv[3]);
     }
 
-    // Launch background thread to listen for async server broadcasts (BOUGHT, SOLD, TRADE)
-    std::thread receiver(receive_loop, &client);
-
-    std::string line;
-    while (running && std::getline(std::cin, line)) {
-        if (line == "QUIT") break;
-        client.send_message(line + "\n");
-    }
-
-    running = false;
-    client.disconnect();
-    if (receiver.joinable()) {
-        receiver.join();
-    }
-    
-    return 0;
+    return run_client_shell(options);
 }
