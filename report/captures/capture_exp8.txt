@@ -1,0 +1,109 @@
+Experiment 8 capture - unexpected client disconnection
+host: FreeBSD exchange-vm 15.1-RELEASE-p3 FreeBSD 15.1-RELEASE-p3 releng/15.1-n283611-88e7371d9dc2 GENERIC amd64
+date: Wed Sep  9 23:42:54 2026
+
+===== connection set changed at t+  0.0s (0 server sockets) =====
+
+$ sockstat -4 -p 5000
+USER COMMAND    PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS
+
+$ netstat -an -p tcp | grep 5000
+
+
+===== connection set changed at t+  0.3s (5 server sockets) =====
+
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+tejasvi python3.12 3984  3 tcp4  127.0.0.1:25143       127.0.0.1:5000       
+tejasvi exchange_s 3981  4 tcp4  127.0.0.1:5000        *:*                  
+tejasvi exchange_s 3981  5 tcp4  127.0.0.1:5000        127.0.0.1:30383      
+tejasvi exchange_s 3981  6 tcp4  127.0.0.1:5000        127.0.0.1:61613      
+tejasvi exchange_s 3981  7 tcp4  127.0.0.1:5000        127.0.0.1:32785      
+tejasvi exchange_s 3981  8 tcp4  127.0.0.1:5000        127.0.0.1:25143      
+tejasvi python3.12 3963  3 tcp4  127.0.0.1:30383       127.0.0.1:5000       
+tejasvi python3.12 3963  4 tcp4  127.0.0.1:61613       127.0.0.1:5000       
+tejasvi python3.12 3963  5 tcp4  127.0.0.1:32785       127.0.0.1:5000
+
+$ netstat -an -p tcp | grep 5000
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.25143        ESTABLISHED
+tcp4           0      0 127.0.0.1.25143        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.32785        ESTABLISHED
+tcp4           0      0 127.0.0.1.32785        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.61613        ESTABLISHED
+tcp4           0      0 127.0.0.1.61613        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.30383        ESTABLISHED
+tcp4           0      0 127.0.0.1.30383        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         *.*                    LISTEN
+
+===== connection set changed at t+  4.1s (4 server sockets) =====
+
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+tejasvi exchange_s 3981  4 tcp4  127.0.0.1:5000        *:*                  
+tejasvi exchange_s 3981  5 tcp4  127.0.0.1:5000        127.0.0.1:30383      
+tejasvi exchange_s 3981  6 tcp4  127.0.0.1:5000        127.0.0.1:61613      
+tejasvi exchange_s 3981  7 tcp4  127.0.0.1:5000        127.0.0.1:32785      
+tejasvi python3.12 3963  3 tcp4  127.0.0.1:30383       127.0.0.1:5000       
+tejasvi python3.12 3963  4 tcp4  127.0.0.1:61613       127.0.0.1:5000       
+tejasvi python3.12 3963  5 tcp4  127.0.0.1:32785       127.0.0.1:5000
+
+$ netstat -an -p tcp | grep 5000
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.32785        ESTABLISHED
+tcp4          34      0 127.0.0.1.32785        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.61613        ESTABLISHED
+tcp4           0      0 127.0.0.1.61613        127.0.0.1.5000         ESTABLISHED
+tcp4           0     17 127.0.0.1.5000         127.0.0.1.30383        ESTABLISHED
+tcp4          17      0 127.0.0.1.30383        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         *.*                    LISTEN
+
+===== server log =====
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:56202 (1 clients)
+Exchange Server is listening.
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:30383 (1 clients)
+[=] fd 5 is a market-data client
+[+] connection accepted: fd 6 from 127.0.0.1:61613 (2 clients)
+[+] connection accepted: fd 7 from 127.0.0.1:32785 (3 clients)
+[=] fd 6 is trader 'experiment_buyer'
+[=] fd 7 is trader 'experiment_seller'
+[+] connection accepted: fd 8 from 127.0.0.1:25143 (4 clients)
+[=] fd 8 is a market-data client
+[-] connection closed: fd 8 - peer closed its sending direction (FIN) (3 clients remain)
+
+===== harness output =====
+=== Experiment 8: Unexpected Client Disconnection ===
+
+Started Exchange Server (PID 3981).
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:56202 (1 clients)
+Exchange Server is listening.
+
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:30383 (1 clients)
+Surviving Market-Data Client: connected from 127.0.0.1:30383
+[=] fd 5 is a market-data client
+Buyer Trader: connected from 127.0.0.1:61613
+[+] connection accepted: fd 6 from 127.0.0.1:61613 (2 clients)
+[+] connection accepted: fd 7 from 127.0.0.1:32785 (3 clients)
+Seller Trader: connected from 127.0.0.1:32785
+[=] fd 6 is trader 'experiment_buyer'
+[=] fd 7 is trader 'experiment_seller'
+[+] connection accepted: fd 8 from 127.0.0.1:25143 (4 clients)
+[=] fd 8 is a market-data client
+
+Both Market-Data Clients should now be connected.
+Generating traffic before the disconnection...
+
+
+The Market-Data Client process will now disappear unexpectedly.
+[-] connection closed: fd 8 - peer closed its sending direction (FIN) (3 clients remain)
+The client process has disappeared.
+Generating additional traffic.
+
+Investigate the terminated connection and the surviving one.
+Press Ctrl-C when you are finished.
+
+Experiment finished.
+Stopping Exchange Server...
+Exchange Server shutting down; closing 3 connection(s).

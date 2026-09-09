@@ -1,0 +1,11 @@
+net.inet.tcp.msl: 30000
+net.inet.tcp.msl_local: 10
+net.inet.tcp.nolocaltimewait: 0
+while established:
+    tcp4           0      0 127.0.0.1.5558         127.0.0.1.35794        ESTABLISHED
+    tcp4           0      0 127.0.0.1.35794        127.0.0.1.5558         ESTABLISHED
+
+after the client closed:
+     0.042s  tcp4           0      0 127.0.0.1.35794        127.0.0.1.5558         TIME_WAIT  
+
+no further entries: the connection is gone 0.076s after close

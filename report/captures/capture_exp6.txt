@@ -1,0 +1,83 @@
+Experiment 6 capture
+host:   FreeBSD exchange-vm 15.1-RELEASE-p3 FreeBSD 15.1-RELEASE-p3 releng/15.1-n283611-88e7371d9dc2 GENERIC amd64
+date:   Wed Sep  9 23:39:27 IST 2026
+server: ok
+
+===== part A: after the orderly FIN  (t+4s) =====
+
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+tejasvi exchange_s 3616  4 tcp4  127.0.0.1:5000        *:*                  
+tejasvi python3.12 3614  3 tcp4  127.0.0.1:41304       127.0.0.1:5000       
+
+$ netstat -an -p tcp | grep -E '5000|Proto|Recv-Q'
+Proto     Recv-Q Send-Q Local Address          Foreign Address        (state)    
+tcp4           0      0 127.0.0.1.41304        127.0.0.1.5000         CLOSED     
+tcp4           0      0 127.0.0.1.5000         *.*                    LISTEN     
+
+$ procstat -f 3616 | head -20
+  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        
+ 3616 exchange_server   text v r r-------   -       - -   /home/tejasvi/exchange/bin/exchange_server
+ 3616 exchange_server    cwd v d r-------   -       - -   /home/tejasvi/exchange
+ 3616 exchange_server   root v d r-------   -       - -   /                 
+ 3616 exchange_server      0 v c r-------   2       0 -   /dev/null         
+ 3616 exchange_server      1 v r -w------   4     392 -   -                 
+ 3616 exchange_server      2 v r -w------   4     392 -   -                 
+ 3616 exchange_server      3 k - rw------   2       0 -   -                 
+ 3616 exchange_server      4 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 *:0
+
+$ ps -o pid,rss,%cpu,wchan,command -p 3616
+ PID  RSS %CPU WCHAN  COMMAND
+3616 3620  0.1 kqread /home/tejasvi/exchange/bin/exchange_server 127.0.0.1 5000
+
+===== part B: after the abortive RST  (t+14s) =====
+
+$ sockstat -4 -p 5000
+USER COMMAND    PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+
+$ netstat -an -p tcp | grep -E '5000|Proto|Recv-Q'
+Proto     Recv-Q Send-Q Local Address          Foreign Address        (state)    
+
+$ procstat -f 3616 | head -20
+procstat: kinfo_getfile(): No such process
+  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        
+
+$ ps -o pid,rss,%cpu,wchan,command -p 3616
+ PID RSS %CPU WCHAN COMMAND
+3616   0  0.0 -     <defunct>
+
+===== later  (t+22s) =====
+
+$ sockstat -4 -p 5000
+USER COMMAND    PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+
+$ netstat -an -p tcp | grep -E '5000|Proto|Recv-Q'
+Proto     Recv-Q Send-Q Local Address          Foreign Address        (state)    
+
+$ procstat -f 3616 | head -20
+procstat: kinfo_getfile(): No such process
+  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        
+
+$ ps -o pid,rss,%cpu,wchan,command -p 3616
+ PID RSS %CPU WCHAN COMMAND
+3616   0  0.0 -     <defunct>
+
+===== server log =====
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:60293 (1 clients)
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:41304 (1 clients)
+[-] connection closed: fd 5 - peer closed its sending direction (FIN) (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:29316 (1 clients)
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+Exchange Server shutting down; closing 0 connection(s).
+
+===== harness output =====
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:60293 (1 clients)
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:41304 (1 clients)
+[-] connection closed: fd 5 - peer closed its sending direction (FIN) (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:29316 (1 clients)
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+Exchange Server shutting down; closing 0 connection(s).

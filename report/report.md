@@ -1,14 +1,20 @@
 # The Socket Exchange — Experiment Report
 
 **Team:** _(roll numbers)_
-**Environment:** FreeBSD 14.4-RELEASE, 2 vCPU, 2 GB RAM, VirtualBox; all
-processes on the loopback interface `127.0.0.1:5000`.
 
-> **Before submitting:** every screenshot placeholder below must be replaced
-> with a real screenshot taken in the FreeBSD VM, and each answer checked
-> against what you actually observe there. The answers as written describe the
-> behaviour this implementation produces; the numbers in Section 9 must be
-> measured, not assumed. Export this file to `report.pdf`.
+**Environment.** FreeBSD 15.1-RELEASE-p3 (amd64), 2 vCPU, 2 GB RAM, hostname
+`exchange-vm`. All processes run inside this VM and communicate over the
+loopback interface; the Exchange Server listens on `127.0.0.1:5000`. Built with
+the base-system `clang++` (C++17). The server's default I/O backend on FreeBSD
+is `kqueue`.
+
+Every observation below was taken on that VM. The raw command output behind
+each one is in `report/captures/`, one file per experiment; the screenshots are
+terminal captures of those same commands.
+
+> **Remaining before submission:** the `tcpdump` captures in Experiments 2, 6
+> and 8 need root and are marked ⚠ below. Everything else is recorded.
+> Export this file to `report.pdf`.
 
 ---
 
@@ -17,8 +23,9 @@ processes on the loopback interface `127.0.0.1:5000`.
 ### Concurrency and I/O model
 
 The Exchange Server is **single-threaded and fully non-blocking**, driven by an
-event loop over `kqueue(2)` on FreeBSD, with a `poll(2)` backend selectable at
-runtime via `EXCHANGE_BACKEND=poll` for comparison.
+event loop over `kqueue(2)`. A `poll(2)` backend is selectable at runtime with
+`EXCHANGE_BACKEND=poll`, so the two mechanisms can be compared directly on the
+same binary.
 
 Every descriptor — the listening socket included — is `O_NONBLOCK`, and each
 connection owns an input buffer and an output buffer:
@@ -29,40 +36,41 @@ connection owns an input buffer and an output buffer:
 - The **output buffer** holds bytes the kernel would not accept. The server
   always attempts the write immediately; if `send()` returns `EAGAIN`, the
   remainder is queued and write-readiness is registered for that descriptor
-  only. This is what stops one client from stalling the others.
+  alone.
 
 ### Why this approach
 
 - **No socket operation can block.** A client that connects and says nothing
   (Experiment 4), sends half a message, or stops reading entirely
   (Experiment 7) cannot delay any other client, because the server never waits
-  on a specific descriptor — only on "any descriptor that is ready".
+  on a particular descriptor — only on "any descriptor that is ready". This is
+  visible in Experiment 4: the server's kernel stack shows it asleep inside
+  `sys_kevent`, not inside `recv()`.
 - **Cost per connection is one descriptor plus two buffers**, with no thread
-  stack, no scheduler pressure and no locking. A thread-per-connection design
-  would need ~8 MB of virtual and tens of KB of committed stack per client,
-  which is the dominant cost at the connection counts in the bonus.
-- **`kqueue` scales with the number of *ready* descriptors**, not the number of
-  registered ones, unlike `poll()` which rescans the whole array on every call.
-- Correctness is much easier to argue for: all state is touched by one thread,
-  so there are no data races on the order book or the subscriber lists.
+  stack, no scheduler pressure and no locking. This matters directly in the
+  bonus, where the limits reached are kernel per-socket limits rather than
+  anything the application imposes.
+- **`kqueue` scales with the number of *ready* descriptors**, not the number
+  registered, unlike `poll()` which rescans the whole array on every call.
+- All state is touched by one thread, so there are no data races on the order
+  book or the subscriber lists.
 
 ### Other decisions that affect TCP behaviour
 
-- **`SIGPIPE` is ignored.** Writing to a socket whose peer has vanished must
-  return `EPIPE` to be handled, not kill the process (Experiment 8).
+- **`SIGPIPE` is ignored**, so writing to a socket whose peer has vanished
+  returns `EPIPE` to be handled rather than killing the process.
 - **Descriptors are closed only at the end of an event batch.** A descriptor
-  freed while its batch is still being processed could otherwise be handed
-  straight back by `accept()` and confused with a stale event for the old
-  connection.
+  freed mid-batch could otherwise be returned immediately by `accept()` and be
+  confused with a stale event belonging to the previous connection.
 - **Orderly close is deferred until the output buffer drains.** On `QUIT` or on
-  reading EOF, the server calls `shutdown(fd, SHUT_RD)` and keeps writing until
-  everything queued has been sent, then closes.
-- **A bound on queued output (16 MB).** A client that never reads is eventually
-  dropped rather than allowed to consume server memory without limit.
-- **`TCP_NODELAY`** is set so that small protocol messages are not delayed by
-  Nagle's algorithm, which would otherwise blur the timing observations.
-- **`SO_REUSEADDR`** on the listening socket, so a restart during `TIME_WAIT`
-  can rebind — the experiment harness restarts the server for every run.
+  reading EOF the server calls `shutdown(fd, SHUT_RD)` and keeps writing until
+  the backlog is gone, then closes.
+- **A 16 MB cap on queued output**, after which a client that never reads is
+  disconnected rather than allowed to consume server memory without bound.
+- **`TCP_NODELAY`**, so small protocol messages are not delayed by Nagle's
+  algorithm and the timing observations are not blurred.
+- **`SO_REUSEADDR`** on the listening socket, so the server can rebind
+  immediately when the harness restarts it.
 
 ---
 
@@ -72,10 +80,10 @@ connection owns an input buffer and an output buffer:
 associated with the Exchange Server. How does the listening socket differ from
 the socket representing the connection to the client?
 
-**Approach.** Ran `python3 experiment.py 1`, then in a second terminal
-inspected the server's sockets while the client connection was idle.
+**Approach.** Ran `python3 experiment.py 1`, then, while the client connection
+was established and idle, listed the server's sockets and descriptors.
 
-**Commands used.**
+**Commands.**
 
 ```sh
 sockstat -4 -p 5000
@@ -83,23 +91,43 @@ netstat -an -p tcp | grep 5000
 procstat -f $(pgrep exchange_server)
 ```
 
-**Observation.** The server owns two TCP sockets. One is in state `LISTEN`
-with a local address of `127.0.0.1:5000` and **no foreign address** (`*:*`).
-The other is `ESTABLISHED`, with the same local address `127.0.0.1:5000` but a
-concrete foreign address — the client's ephemeral port. They are different
-descriptors on the same process: the server's own log shows the listening
-socket as fd 3 and the accepted connection as a separate fd.
+**Observation.**
 
-**Answer.** The listening socket is a passive endpoint: it is bound to the
-port, is identified by the local address alone, carries no peer and no data,
-and exists only to complete handshakes and produce new descriptors. The
-connected socket returned by `accept()` is identified by the full four-tuple
-(local IP, local port, remote IP, remote port), is in `ESTABLISHED`, and is the
-only one of the two over which data actually flows.
+```
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS
+tejasvi exchange_s 3287  4 tcp4  127.0.0.1:5000        *:*
+tejasvi exchange_s 3287  5 tcp4  127.0.0.1:5000        127.0.0.1:42427
+tejasvi python3.12 3285  3 tcp4  127.0.0.1:42427       127.0.0.1:5000
 
-**Deliverable.** _[Screenshot: `sockstat -4 -p 5000` showing one `LISTEN` row
-with no foreign address and one `ESTABLISHED` row with the client's ephemeral
-port.]_
+$ netstat -an -p tcp | grep 5000
+tcp4  0  0  127.0.0.1.5000   127.0.0.1.42427  ESTABLISHED
+tcp4  0  0  127.0.0.1.42427  127.0.0.1.5000   ESTABLISHED
+tcp4  0  0  127.0.0.1.5000   *.*              LISTEN
+
+$ procstat -f 3287
+ PID COMM              FD T ...  PRO NAME
+3287 exchange_server    3 k ...  -    -                                    <- kqueue
+3287 exchange_server    4 s ...  TCP 0 0 127.0.0.1:5000 *:0                <- listening
+3287 exchange_server    5 s ...  TCP 0 0 127.0.0.1:5000 127.0.0.1:42427    <- connected
+```
+
+The server holds **two** TCP sockets on two different descriptors. Descriptor 4
+is bound to `127.0.0.1:5000` with foreign address `*:*` and is in state
+`LISTEN`. Descriptor 5 has the *same* local address but a concrete foreign
+address, the client's ephemeral port 42427, and is `ESTABLISHED`. (Descriptor 3
+is the kqueue itself, shown by `procstat` with type `k`.)
+
+**Answer.** The listening socket is a passive endpoint: it is identified by its
+local address alone, has no peer, carries no data, and exists only to complete
+handshakes and hand back new descriptors. The socket returned by `accept()` is
+identified by the full four-tuple (local IP, local port, remote IP, remote
+port), is in `ESTABLISHED`, and is the only one of the two over which data
+flows. Both share the local port 5000; what distinguishes them is the presence
+of a remote endpoint.
+
+**Deliverable.** Screenshot of the `sockstat` / `netstat` / `procstat` output
+above — `report/captures/capture_exp1.txt`.
 
 ---
 
@@ -108,90 +136,121 @@ port.]_
 **Question.** How does the TCP state of the client–server connection change
 during its lifetime, and what events cause the observed state changes?
 
-**Approach.** Ran `python3 experiment.py 2` and sampled the connection state in
-each phase, with `tcpdump` capturing the loopback traffic throughout.
+**Approach.** Ran `python3 experiment.py 2` and sampled the connection in each
+phase. Because the harness's phases are seconds apart but one of the states
+lasts only milliseconds here (see below), a second, tightly-sampling
+observation was made with `tools/observe_timewait.sh`.
 
-**Commands used.**
+**Commands.**
 
 ```sh
-tcpdump -i lo0 -n port 5000        # in a separate terminal, started first
-netstat -an -p tcp | grep 5000     # sampled during phase 1 and phase 2
+netstat -an -p tcp | grep 5000        # sampled during phase 1 and phase 2
 sockstat -4 -p 5000
+sh tools/observe_timewait.sh 5558     # samples in a tight loop across the close
+sysctl net.inet.tcp.msl net.inet.tcp.msl_local
 ```
 
-**Observation.**
+**Observation.** Phase 1, connection established and idle:
 
-| Phase | Event | State observed |
-|---|---|---|
-| Connect | three-way handshake `SYN`, `SYN/ACK`, `ACK` | `ESTABLISHED` on both ends |
-| Idle | no application data at all | stays `ESTABLISHED`; no packets on the wire |
-| Client closes | client sends `FIN`, server `ACK`s | client `FIN_WAIT_2`, server `CLOSE_WAIT` momentarily |
-| Server responds | server's `recv()` returns 0, server closes, sends its own `FIN`; client `ACK`s | server socket gone, client `TIME_WAIT` |
-| After ~2×MSL | timer expires | connection disappears entirely |
+```
+tcp4  0  0  127.0.0.1.5000   127.0.0.1.26131  ESTABLISHED
+tcp4  0  0  127.0.0.1.26131  127.0.0.1.5000   ESTABLISHED
+tcp4  0  0  127.0.0.1.5000   *.*              LISTEN
+```
 
-The server log marks the transition explicitly:
-`connection closed: fd 5 - peer closed its sending direction (FIN)`.
+It stays exactly like this for the whole 10-second idle period: an idle TCP
+connection produces no traffic and needs none. The server log records nothing
+between the accept and the close.
 
-**Answer.** The connection is created by the three-way handshake and reaches
-`ESTABLISHED`; it stays there indefinitely while idle, because an idle TCP
-connection generates no traffic and needs none. Termination is a *separate*
-four-way exchange in which each direction is shut down independently: the
-client's `FIN` moves it to `FIN_WAIT_2` and the server to `CLOSE_WAIT`; the
-server's `recv()` returning 0 is how the application learns of this, and its
-own `close()` sends the second `FIN`, after which the side that closed first
-sits in `TIME_WAIT` for 2×MSL so that delayed duplicate segments cannot be
-mistaken for part of a later connection on the same four-tuple.
+Phase 2, three seconds after the client closed, only the listening socket
+remains — no `TIME_WAIT` entry is visible. Sampling in a tight loop explains
+why:
 
-**Deliverable.** _[Screenshots: `netstat` output during phase 1
-(`ESTABLISHED`), and during phase 2 (`TIME_WAIT`); the `tcpdump` capture
-showing `SYN`/`SYN,ACK`/`ACK` and the `FIN`/`ACK`/`FIN`/`ACK` exchange.]_
+```
+$ sysctl net.inet.tcp.msl net.inet.tcp.msl_local
+net.inet.tcp.msl: 30000
+net.inet.tcp.msl_local: 10
+
+after the client closed:
+     0.042s  tcp4  0  0  127.0.0.1.35794  127.0.0.1.5558  TIME_WAIT
+no further entries: the connection is gone 0.076s after close
+```
+
+FreeBSD uses a separate, much shorter MSL for connections whose peer is local:
+`net.inet.tcp.msl_local` is **10 ms**, against 30 s for `net.inet.tcp.msl`.
+`TIME_WAIT` therefore lasts roughly 20 ms over loopback and is invisible to a
+once-per-second `netstat`.
+
+The server-side transition is recorded in its own log:
+
+```
+[-] connection closed: fd 5 - peer closed its sending direction (FIN)
+```
+
+**Answer.** The connection is created by the three-way handshake and enters
+`ESTABLISHED`, where it stays indefinitely while idle. Termination is a
+separate exchange in which each direction is closed independently: the client's
+`close()` sends a `FIN`; the server's `recv()` returns 0, which is how the
+application learns of it; the server then closes, sending its own `FIN`, which
+the client acknowledges. The side that closed first — the client — passes
+through `TIME_WAIT`, which exists so that delayed duplicate segments cannot be
+mistaken for part of a later connection reusing the same four-tuple. On this
+system that state is real but extremely short-lived, because the connection is
+over loopback and FreeBSD applies `msl_local` (10 ms) rather than the 30 s
+`msl`; over a real network the same connection would sit in `TIME_WAIT` for
+about a minute.
+
+**Deliverable.** Screenshots of the phase 1 and phase 2 `netstat` output and of
+the tight-sampling run above —
+`report/captures/capture_exp2.txt`, `report/captures/timewait_observation.txt`.
+⚠ Optionally add a `tcpdump -i lo0 -n port 5000` capture (needs root) showing
+`SYN` / `SYN,ACK` / `ACK` and the `FIN` / `ACK` / `FIN` / `ACK` exchange.
 
 ---
 
 ## Experiment 3 — TCP as a Byte Stream
 
 **Question.** Does the Exchange Server receive the application-level message as
-one complete unit, or can the message be received in multiple pieces? What does
-this demonstrate about the relationship between TCP and application-level
-message boundaries?
+one complete unit, or can it be received in multiple pieces? What does this
+demonstrate about the relationship between TCP and application-level message
+boundaries?
 
 **Approach.** The harness sends `LOGIN experiment_trader\n` as four separate
-writes with 200 ms between them. The server was started with tracing enabled so
-that every `recv()` and every reassembled message is logged:
+writes 200 ms apart. The server was run with tracing enabled so that every
+`recv()` and every reassembled message is logged:
 
 ```sh
 EXCHANGE_VERBOSE=1 python3 experiment.py 3
-tcpdump -i lo0 -n -A port 5000     # confirms four separate segments
 ```
 
-**Observation.** The server logged four separate reads and exactly one
-application message:
+**Observation.**
 
 ```
-[recv] fd 5: 6 byte(s) from the TCP stream
-[recv] fd 5: 10 byte(s) from the TCP stream
-[recv] fd 5: 7 byte(s) from the TCP stream
-[recv] fd 5: 1 byte(s) from the TCP stream
-[msg ] fd 5: complete message "LOGIN experiment_trader"
-[=] fd 5 is trader 'experiment_trader'
+Sent 6 bytes.        [recv] fd 5: 6 byte(s) from the TCP stream
+Sent 10 bytes.       [recv] fd 5: 10 byte(s) from the TCP stream
+Sent 7 bytes.        [recv] fd 5: 7 byte(s) from the TCP stream
+Sent 1 bytes.        [recv] fd 5: 1 byte(s) from the TCP stream
+                     [msg ] fd 5: complete message "LOGIN experiment_trader"
+                     [=] fd 5 is trader 'experiment_trader'
 ```
 
-6 + 10 + 7 + 1 = 24 bytes on the wire become one 23-character message plus its
-terminating newline. No response was sent until the fourth read delivered the
-`\n`.
+Four `recv()` calls returning 6, 10, 7 and 1 bytes — 24 bytes in total —
+produce exactly **one** 23-character application message plus its terminating
+newline. Nothing was acted on and no response was sent until the fourth read
+delivered the `\n`.
 
-**Answer.** The message arrives in **multiple pieces** — here one `recv()` per
-`send()`, and the last one carrying a single byte. TCP is a byte stream with no
-notion of application messages: it preserves byte order but not the boundaries
-of the writes that produced those bytes. The receiver must impose framing
-itself, which this implementation does by buffering incoming bytes and
-splitting on `\n`. The converse also holds and is covered by the test suite:
-several messages sent in one write can arrive in a single `recv()`, and a
-message can be split at any position — hence there is no correspondence between
-calls to `send()` and calls to `recv()`.
+**Answer.** The message is received in **multiple pieces**, here one `recv()`
+per `send()`, the last of them a single byte. TCP is a byte stream: it
+preserves the order of bytes but not the boundaries of the writes that produced
+them, so there is no correspondence between calls to `send()` and calls to
+`recv()`. The receiver must impose framing itself, which this implementation
+does by appending incoming bytes to a per-connection buffer and splitting on
+`\n`. The converse cases hold too and are covered by the test suite: several
+messages written at once can arrive in a single `recv()`, and a message can be
+split at any position, including between the last character and its newline.
 
-**Deliverable.** _[Screenshot: the verbose server log above, alongside the
-harness output showing "Sent 6 bytes / 10 / 7 / 1".]_
+**Deliverable.** Screenshot of the harness output beside the verbose server log
+— `report/captures/capture_exp3.txt`.
 
 ---
 
@@ -204,15 +263,15 @@ operation that determines the answer.
 **Approach.** Ran `python3 experiment.py 4`. Client 1 sends
 `LOGIN blocked_client` **without a terminating newline** and then goes silent;
 Client 2 connects two seconds later and sends a complete message. While both
-were connected, the server process was inspected to see what it was blocked on.
+were connected, the server's kernel stack was inspected to find what it was
+actually waiting in.
 
-**Commands used.**
+**Commands.**
 
 ```sh
 sockstat -4 -p 5000
-procstat -f  $(pgrep exchange_server)      # both connections open
-procstat -kk $(pgrep exchange_server)      # what the process is waiting in
-ktrace -p $(pgrep exchange_server) ; kdump # the syscall it sleeps in
+procstat -kk $(pgrep exchange_server)      # what the process is sleeping in
+ps -o pid,rss,%cpu,wchan,command -p $(pgrep exchange_server)
 ```
 
 **Observation.** The harness reported:
@@ -222,24 +281,48 @@ Client 2 response: 'OK'
 Elapsed time: 0.001 seconds
 ```
 
-Both connections were `ESTABLISHED` at the same time. The server was asleep in
-`kevent()` (`poll()` with the poll backend) — **not** in `recv()` or `accept()`
-on Client 1's descriptor. Client 1's partial message stayed in the server's
-input buffer, unanswered, exactly as it should: the message is not complete.
+Both connections were established simultaneously (server fds 5 and 6), and the
+server log shows that only Client 2 ever completed a command:
 
-**Answer.** Yes — Client 2 was accepted and answered in about 1 ms. The
-deciding operation is the readiness wait: the server blocks in
-`kevent()`/`poll()` on the *whole* descriptor set, and only calls `recv()` on a
-descriptor the kernel has already reported as readable. It therefore never
-waits on Client 1 specifically. A server that instead called blocking `recv()`
-on Client 1 would sit in that call indefinitely and never reach `accept()`, and
-Client 2's `OK` would never arrive. Note that Client 1's partial message is
-correctly left pending rather than acted on — completing it later with a `\n`
-produces the `OK`, which the test suite verifies.
+```
+[+] connection accepted: fd 5 from 127.0.0.1:13347 (1 clients)     <- Client 1
+[+] connection accepted: fd 6 from 127.0.0.1:51691 (2 clients)     <- Client 2
+[=] fd 6 is trader 'active_client'
+```
 
-**Deliverable.** _[Screenshots: the harness output showing the ~1 ms elapsed
-time; `sockstat` showing both connections `ESTABLISHED`; `procstat -kk`
-showing the server sleeping in `kevent`.]_
+Client 1's partial message stayed in the server's input buffer, unanswered and
+un-acted-on, exactly as it should: the message is not yet complete. The
+decisive evidence is where the server was sleeping:
+
+```
+$ procstat -kk 3480
+  PID    TID COMM             KSTACK
+ 3480 100183 exchange_server  mi_switch+0xbc sleepq_catch_signals+0x27d
+                              sleepq_timedwait_sig+0x12 _sleep+0x180
+                              kqueue_scan+0xa11 kqueue_kevent+0x13b
+                              kern_kevent_fp+0x66 kern_kevent_generic+0xdf
+                              sys_kevent+0x61 amd64_syscall+0x126
+
+$ ps -o wchan,command -p 3480
+WCHAN  COMMAND
+kqread /home/tejasvi/exchange/bin/exchange_server 127.0.0.1 5000
+```
+
+**Answer.** Yes — Client 2 was accepted and answered in about **1 ms**. The
+deciding operation is the readiness wait: the server blocks in `kevent()` on
+the *whole* descriptor set, and calls `recv()` only on a descriptor the kernel
+has already reported as readable. It therefore never waits on Client 1
+specifically. The stack trace confirms this directly: the process is asleep in
+`sys_kevent`, with `WCHAN` = `kqread`, not in a `recv()` on Client 1's socket.
+A server that instead issued a blocking `recv()` on Client 1 would sit in that
+call indefinitely, never reach `accept()`, and Client 2's `OK` would never
+arrive. Note also that Client 1's incomplete message is correctly held pending
+rather than acted upon; completing it later with a `\n` produces the `OK`,
+which the test suite verifies.
+
+**Deliverable.** Screenshots of the harness's elapsed time, `sockstat` showing
+both connections, and the `procstat -kk` stack —
+`report/captures/capture_exp4.txt`.
 
 ---
 
@@ -249,31 +332,53 @@ showing the server sleeping in `kevent`.]_
 connections are actually ready for the server to service, and what evidence
 from the running system allows you to determine this?
 
-**Approach.** Ran `python3 experiment.py 5`, which opens five connections; only
-clients 1, 3 and 5 send data, at half-second intervals. Traced the server's
-system calls to see which descriptors `kevent()` reported.
+**Approach.** Ran `python3 experiment.py 5`, which opens five connections;
+only clients 1, 3 and 5 send data. Compared the set of established connections
+with the set the server actually acted on.
 
-**Commands used.**
+**Commands.**
 
 ```sh
 sockstat -4 -p 5000
-ktrace -i -p $(pgrep exchange_server) ; kdump -f ktrace.out | grep -E 'kevent|recv'
-netstat -an -p tcp | grep 5000     # Recv-Q per connection
+netstat -an -p tcp | grep 5000       # Recv-Q per connection
 ```
 
-**Answer.** All five connections are `ESTABLISHED` for the whole experiment,
-but at any instant only the descriptors belonging to clients 1, 3 and 5 are
-*ready*, and only at the moments they send. The evidence is two-fold: `kdump`
-shows `kevent()` returning exactly those descriptors and the server issuing
-`recv()` on those alone, and `netstat` shows a non-zero `Recv-Q` only on those
-connections. Clients 2 and 4 are established but have empty receive queues and
-never appear in a `kevent()` result, so the server does no work for them at
-all. Readiness is a property of a socket at an instant, not of the connection's
-existence — which is the whole point of I/O multiplexing.
+**Observation.** All five connections exist at once, on server fds 5–9:
 
-**Deliverable.** _[Screenshots: `sockstat` showing five established
-connections; `kdump` output showing `kevent()` returning only the active
-descriptors.]_
+```
+tejasvi exchange_s 3547  4 tcp4  127.0.0.1:5000  *:*                 <- listening
+tejasvi exchange_s 3547  5 tcp4  127.0.0.1:5000  127.0.0.1:57957
+tejasvi exchange_s 3547  6 tcp4  127.0.0.1:5000  127.0.0.1:39724
+tejasvi exchange_s 3547  7 tcp4  127.0.0.1:5000  127.0.0.1:49038
+tejasvi exchange_s 3547  8 tcp4  127.0.0.1:5000  127.0.0.1:11800
+tejasvi exchange_s 3547  9 tcp4  127.0.0.1:5000  127.0.0.1:26734
+```
+
+but the server only ever did work for three of them:
+
+```
+[=] fd 5 is trader 'client_1'
+[=] fd 7 is trader 'client_3'
+[=] fd 9 is trader 'client_5'
+```
+
+`Recv-Q` is 0 on every connection whenever sampled, including the active ones,
+because the server drains each socket as soon as it is reported readable.
+
+**Answer.** All five connections are `ESTABLISHED` throughout, but at any
+instant only the sockets belonging to clients 1, 3 and 5 are *ready*, and only
+at the moments those clients send. The evidence is that the server acted on
+exactly descriptors 5, 7 and 9 — the odd-numbered clients — and never on 6 or
+8, which remained connected but silent for the whole run. That `Recv-Q` is 0
+even for the active connections is itself informative: readiness is transient,
+and the server consumes the data in the same wakeup in which the kernel reports
+it. Readiness is a property of a socket at an instant, not of the connection's
+existence, which is precisely what makes I/O multiplexing worthwhile: the
+server does no work at all for the two idle connections.
+
+**Deliverable.** Screenshot of `sockstat` showing five simultaneous connections
+alongside the server log showing which descriptors were serviced —
+`report/captures/capture_exp5.txt`.
 
 ---
 
@@ -283,41 +388,51 @@ descriptors.]_
 shutdown? Identify the TCP event observed on the network and the corresponding
 behaviour of the Exchange Server's socket.
 
-**Approach.** Ran `python3 experiment.py 6` with `tcpdump` running. Part A
-performs `shutdown(SHUT_WR)` — an orderly half-close. Part B sets
-`SO_LINGER` with a zero timeout and closes, which makes the kernel send `RST`
-instead of `FIN`.
+**Approach.** Ran `python3 experiment.py 6`. Part A performs
+`shutdown(SHUT_WR)`, an orderly half-close. Part B sets `SO_LINGER` with a zero
+timeout and closes, which makes the kernel send `RST` instead of `FIN`.
 
-**Commands used.**
+**Commands.**
 
 ```sh
-tcpdump -i lo0 -n -S 'port 5000 and (tcp[tcpflags] & (tcp-fin|tcp-rst)) != 0'
 netstat -an -p tcp | grep 5000
+# ⚠ needs root:
+tcpdump -i lo0 -n 'port 5000 and (tcp[tcpflags] & (tcp-fin|tcp-rst)) != 0'
 ```
 
-**Observation.**
+**Observation.** The two halves are cleanly distinguished by how the server's
+`recv()` failed:
+
+```
+Part A (orderly, FIN):
+[-] connection closed: fd 5 - peer closed its sending direction (FIN)
+
+Part B (abortive, RST):
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer
+```
 
 | | Part A (orderly) | Part B (abrupt) |
 |---|---|---|
-| On the wire | `FIN`, then `ACK`; server's own `FIN`, then `ACK` | a single `RST`, nothing acknowledged |
-| Server's socket | `recv()` returns **0** | `recv()` fails with **`ECONNRESET`** |
-| Server log | `peer closed its sending direction (FIN)` | `recv() failed: Connection reset by peer` |
-| States seen | `CLOSE_WAIT` / `FIN_WAIT_2`, then `TIME_WAIT` | no `TIME_WAIT`; the connection is destroyed immediately |
+| On the wire | `FIN`, acknowledged; then the server's own `FIN`, acknowledged | a single unacknowledged `RST` |
+| Server's `recv()` | returns **0** | fails with **`ECONNRESET`** |
 | Queued data | still delivered before the close completes | discarded |
+| States | `FIN_WAIT_2` / `CLOSE_WAIT`, then a brief `TIME_WAIT` | none; the connection is destroyed at once |
 
 **Answer.** The orderly shutdown is a negotiated, per-direction close: the
 `FIN` is acknowledged, data already in flight is still delivered, the
-application sees a clean end-of-stream (`recv()` returning 0), and the side that
-closed first passes through `TIME_WAIT`. The abrupt close is a single
-unacknowledged `RST` that tears the connection down immediately: any queued data
-is discarded, the server's `recv()` fails with `ECONNRESET` rather than
-returning 0, and there is no `TIME_WAIT` because there is no state left to
-protect. In both cases the server frees the session and continues serving other
-clients; the distinction is visible to the application only in *how* the read
-fails.
+application sees a clean end-of-stream in the form of `recv()` returning 0, and
+the side that closed first passes through `TIME_WAIT`. The abrupt close is a
+single unacknowledged `RST` that tears the connection down immediately: queued
+data is discarded, the server's `recv()` fails with `ECONNRESET` instead of
+returning 0, and there is no `TIME_WAIT` because no state remains to protect.
+In both cases the server frees the session and carries on serving other
+clients; the difference is visible to the application only in *how* the read
+ended — a zero-length return versus an error.
 
-**Deliverable.** _[Screenshots: the `tcpdump` capture showing `FIN`/`ACK` in
-Part A and a lone `RST` in Part B; the corresponding server log lines.]_
+**Deliverable.** Screenshot of the two server log lines above with the
+`netstat` state at each stage — `report/captures/capture_exp6.txt`.
+⚠ Add the `tcpdump` capture (needs root) showing `FIN`/`ACK` in Part A and a
+lone `RST` in Part B.
 
 ---
 
@@ -329,64 +444,76 @@ eventually affects the server's ability to communicate with other clients?
 
 **Approach.** Ran `python3 experiment.py 7`. Two market-data clients subscribe
 to `JNST`; one drains continuously, the other never reads. Two traders generate
-matching pairs, producing a `TRADE` broadcast per match. Both connections were
-compared while the traffic ran.
+matching pairs, producing a `TRADE` broadcast per match. Sampled both
+connections repeatedly while the traffic ran.
 
-**Commands used.**
+**Commands.**
 
 ```sh
-netstat -an -p tcp | grep 5000        # Recv-Q and Send-Q per connection, repeatedly
+netstat -an -p tcp | grep 5000       # Recv-Q / Send-Q per connection, repeatedly
 sockstat -4 -p 5000
-tcpdump -i lo0 -n 'port 5000 and tcp[tcpflags] & tcp-push != 0'   # window updates
 ```
 
-**Observation.** The two connections diverge:
+**Observation.** The two subscriber connections diverge steadily. Port 42665 is
+the slow client, 43485 the normal one:
 
-- **Slow client.** Its `Recv-Q` climbs to the receive-buffer limit and stops
-  there. The server's `Send-Q` for that connection then climbs to the send-buffer
-  limit. Once both are full, TCP advertises a **zero window** and the server's
-  `send()` starts returning `EAGAIN`, at which point the server queues the
-  remaining updates in user space and registers write-interest for that
-  descriptor only. The server logs the transition:
-  `[!] fd N is not draining its socket; buffering output`.
-- **Normal client.** `Recv-Q` and `Send-Q` stay near zero throughout, and it
-  keeps receiving fresh `TRADE` updates at full rate.
-- **Everything else.** The traders continue to receive `ORDER_ACCEPTED`,
-  `BOUGHT` and `SOLD` without added latency, and a brand-new client connecting
-  during the stall is still served in milliseconds.
+```
+t+20s
+tcp4      0     17  127.0.0.1.5000   127.0.0.1.42665  ESTABLISHED   <- server -> slow
+tcp4   9656      0  127.0.0.1.42665  127.0.0.1.5000   ESTABLISHED   <- slow client
+tcp4      0     17  127.0.0.1.5000   127.0.0.1.43485  ESTABLISHED   <- server -> normal
+tcp4     17      0  127.0.0.1.43485  127.0.0.1.5000   ESTABLISHED   <- normal client
+
+t+45s
+tcp4      0      0  127.0.0.1.5000   127.0.0.1.42665  ESTABLISHED
+tcp4  21828      0  127.0.0.1.42665  127.0.0.1.5000   ESTABLISHED   <- still climbing
+tcp4      0      0  127.0.0.1.5000   127.0.0.1.43485  ESTABLISHED
+tcp4      0      0  127.0.0.1.43485  127.0.0.1.5000   ESTABLISHED   <- stays empty
+```
+
+The slow client's receive queue grows monotonically — 9,656 bytes at t+20s,
+21,828 at t+45s — while the normal client's queues stay at 0–17 bytes, one
+message at most. Both traders continued to receive `ORDER_ACCEPTED`, `BOUGHT`
+and `SOLD` throughout, and the server kept accepting new connections.
+
+At the volume this experiment generates (~5,000 trades ≈ 85 KB) the data all
+fits in the slow client's receive buffer, because FreeBSD auto-tunes it upward
+towards `net.inet.tcp.recvbuf_max` (8 MB) regardless of `SO_RCVBUF`. The window
+therefore never closes and the server never has to buffer in user space. Push
+past that and it does; with the per-connection send buffer reduced
+(`EXCHANGE_SNDBUF=4096`) and about 10,000 trades (~166 KB), the server logs:
+
+```
+[!] fd 5 is not draining its socket; buffering output (backlog now 17 bytes)
+```
+
+while a client connecting at that same moment is still answered in 0.2 ms.
+This path is asserted by the test suite
+(`A full send buffer makes the server queue output instead of blocking`).
 
 **Answer.** The connection to the slow client fills up from the receiver
-backwards: first its receive buffer, then the server's send buffer, then TCP
-flow control closes the window and the server's `send()` returns `EAGAIN`.
-Because the server is non-blocking, that `EAGAIN` is simply a signal to buffer
-and move on — so backpressure stays confined to the offending connection and
-does **not** affect the other clients. The evidence is the contrast between the
-two connections' `Recv-Q`/`Send-Q` in `netstat` together with the normal
-subscriber's continued, timely updates. Two caveats are worth stating: the
-server's user-space queue for that client grows without help from TCP, which is
-why there is a 16 MB cap after which the client is disconnected; and a
-*blocking* server would have stalled every client at the first full send
-buffer, since it would have been parked inside `send()` for the slow client.
+backwards. First its receive buffer accumulates the undelivered updates — this
+is the `Recv-Q` growth above, and it is the directly observable symptom. If the
+client keeps not reading, that buffer reaches its auto-tuned ceiling, TCP flow
+control advertises a zero window, the server's send buffer fills behind it, and
+`send()` begins returning `EAGAIN`. Because the server is non-blocking, that
+`EAGAIN` is merely a signal to queue the remainder in user space and move on,
+so **the backpressure stays confined to the offending connection and does not
+affect the other clients**. The evidence is the contrast in the table above —
+one connection's `Recv-Q` climbing into the tens of kilobytes while the other's
+stays empty — together with the normal subscriber's undisturbed update rate and
+the server's continued acceptance of new connections.
 
-**Deliverable.** _[Screenshots: `netstat` showing the slow connection's full
-`Recv-Q`/`Send-Q` next to the normal connection's empty queues; the server's
-backpressure log line.]_
+Two caveats are worth stating. The server's user-space queue for such a client
+grows without any help from TCP, which is why there is a 16 MB cap after which
+the client is disconnected. And a *blocking* server would have behaved entirely
+differently: it would have parked inside `send()` at the first full send buffer
+and stalled every other client until the slow one read.
 
-> **Making the effect visible.** Whether backpressure appears at all depends on
-> how much data the socket buffers can absorb. This experiment generates roughly
-> 120 KB of updates; FreeBSD's defaults (`net.inet.tcp.sendspace` = 32 KB,
-> `recvspace` = 64 KB) are smaller than that, so `send()` reaches `EAGAIN` and
-> the effect is clearly visible. If it is not — buffer auto-tuning can absorb
-> the whole volume — shrink the server's per-connection send buffer and rerun:
->
-> ```sh
-> EXCHANGE_SNDBUF=4096 python3 experiment.py 7
-> ```
->
-> That was verified directly: with a 4 KB send buffer and a subscriber that
-> stops reading, the server logs
-> `[!] fd 4 is not draining its socket; buffering output`, while a brand-new
-> client connecting at that moment is still served in 0.2 ms.
+**Deliverable.** Screenshots of the repeated `netstat` output showing the slow
+connection's growing `Recv-Q` beside the normal connection's empty queues, and
+of the backpressure log line —
+`report/captures/capture_exp7.txt`, `report/captures/capture_exp7_sndbuf.txt`.
 
 ---
 
@@ -400,153 +527,200 @@ failure?
 **Approach.** Ran `python3 experiment.py 8`. A separate market-data client
 *process* subscribes to `JNST` and is then `SIGKILL`ed while the server is
 actively sending it updates; a second market-data connection stays up for
-comparison.
+comparison. The disappearing client exists for only a few seconds, so the
+connections were sampled continuously (`tools/capture_exp8.py`) rather than on
+a fixed schedule.
 
-**Commands used.**
+**Commands.**
 
 ```sh
+python3 tools/capture_exp8.py        # samples sockstat/netstat continuously
+# ⚠ needs root:
 tcpdump -i lo0 -n -S port 5000
-sockstat -4 -p 5000                # before and after the kill
-netstat -an -p tcp | grep 5000
 ```
 
-**Observation.** `SIGKILL` gives the process no chance to run any shutdown
-code, but the kernel still closes its descriptors on its behalf. The important
-detail is *how* it closes them: the killed client had `TRADE` updates sitting
-unread in its receive queue, and when a socket is closed with unread data
-pending, TCP sends a **`RST`** rather than a `FIN` — there is no point
-completing an orderly shutdown for data nobody will ever read. The server's
-`recv()` therefore failed with `ECONNRESET`, which is exactly what its log
-shows:
+**Observation.** Before the kill, five server sockets exist — the listening
+socket, the surviving subscriber, two traders, and the helper on fd 8. The
+helper is a separate process, PID 3984:
 
 ```
-[+] connection accepted: fd 7 from 127.0.0.1:36186 (4 clients)
-[=] fd 7 is a market-data client
-[-] connection closed: fd 7 - recv() failed: Connection reset by peer (3 clients remain)
+tejasvi python3.12 3984  3 tcp4  127.0.0.1:25143  127.0.0.1:5000     <- helper process
+tejasvi exchange_s 3981  4 tcp4  127.0.0.1:5000   *:*
+tejasvi exchange_s 3981  5 tcp4  127.0.0.1:5000   127.0.0.1:30383
+tejasvi exchange_s 3981  6 tcp4  127.0.0.1:5000   127.0.0.1:61613
+tejasvi exchange_s 3981  7 tcp4  127.0.0.1:5000   127.0.0.1:32785
+tejasvi exchange_s 3981  8 tcp4  127.0.0.1:5000   127.0.0.1:25143    <- to the helper
 ```
 
-The surviving market-data connection (fd 4) stayed `ESTABLISHED` and kept
-receiving every update through the 50 post-disconnection trades, and the server
-process was unaffected throughout.
+3.8 seconds later, immediately after the `SIGKILL`:
 
-**Answer.** The connection is torn down by the kernel on the dead process's
-behalf, and because data was still queued unread, it is torn down **abruptly
-with a `RST`, not a `FIN`**. The server detects the failure on whichever
-operation touches the socket first: the `recv()` that fails with `ECONNRESET`,
-or, if it writes first, a `send()` that fails with `EPIPE`. Either way it
-removes the session, drops its subscriptions and cancels its resting orders,
-and continues serving everyone else. `SIGPIPE` is ignored precisely so that the
-failing write returns an error to be handled rather than killing the server.
+```
+tejasvi exchange_s 3981  4 tcp4  127.0.0.1:5000   *:*
+tejasvi exchange_s 3981  5 tcp4  127.0.0.1:5000   127.0.0.1:30383
+tejasvi exchange_s 3981  6 tcp4  127.0.0.1:5000   127.0.0.1:61613
+tejasvi exchange_s 3981  7 tcp4  127.0.0.1:5000   127.0.0.1:32785
+```
 
-The network-level evidence is the `tcpdump` capture: a `RST` at the instant of
-the kill (rather than the `FIN`/`ACK`/`FIN`/`ACK` sequence seen in
-Experiment 2), followed by a `RST` in reply to each subsequent segment the
-server sends to that port, and `sockstat` showing the connection gone
-immediately with no `TIME_WAIT` entry. Had the client been killed while its
-receive queue was *empty*, the close would have produced an ordinary `FIN` and
-the server would have seen `recv()` return 0 instead — the same end-of-stream
-indication as a voluntary `QUIT`, which is why an unexpected death and a clean
-exit can be indistinguishable at the TCP level.
+PID 3984 is gone, server fd 8 is gone, and both endpoints of that connection
+have disappeared from `netstat`; the three surviving connections are still
+`ESTABLISHED` and still receiving. The server recorded how it found out:
 
-Worth noting: if the client's *machine* had disappeared rather than its process,
-no `FIN` or `RST` would be generated at all, and the server would only learn of
-the failure on its next write, after TCP retransmissions timed out — or never,
-had the connection been idle and TCP keepalives disabled.
+```
+[+] connection accepted: fd 8 from 127.0.0.1:25143 (4 clients)
+[=] fd 8 is a market-data client
+[-] connection closed: fd 8 - peer closed its sending direction (FIN) (3 clients remain)
+```
 
-**Deliverable.** _[Screenshots: `tcpdump` showing the `FIN` at the moment of the
-kill and the subsequent `RST`; `sockstat` before and after showing the dead
-connection gone and the surviving one still `ESTABLISHED`; the server log line
-for the disconnection.]_
+**Answer.** `SIGKILL` gives the process no chance to run any shutdown code, but
+the kernel still closes its descriptors on its behalf, and that close performs
+an ordinary TCP shutdown: a **`FIN`** is sent, and the server's `recv()` returns
+**0**. At the TCP level an unexpected process death and a deliberate `close()`
+are therefore indistinguishable — the server sees exactly the same
+end-of-stream indication it would see for a client that exited cleanly, which
+is why the log line is the same one as in Experiment 6 Part A. The server reaps
+the session, removes its subscriptions, drops any resting orders, and continues
+serving the other clients without interruption.
+
+The failure can also be detected on the write side. If the server writes to
+such a connection before it has processed the `FIN`, or after the socket has
+been fully torn down, the segment draws a `RST` and the next `send()` fails
+with `EPIPE` or `ECONNRESET`; `SIGPIPE` is ignored precisely so that this
+returns an error to be handled rather than killing the server. Which of the two
+paths fires depends on timing and on whether data was still queued unread —
+under Linux, where the killed client had unconsumed `TRADE` updates in its
+receive queue, the close produced a `RST` and the server saw `ECONNRESET`
+instead.
+
+Worth noting for contrast: had the client's *machine* disappeared rather than
+its process, neither a `FIN` nor a `RST` would have been generated, and the
+server would have learned of the failure only on its next write, after TCP
+retransmissions timed out — or never, had the connection been idle with
+keepalives disabled.
+
+**Deliverable.** Screenshots of `sockstat` immediately before and after the
+kill, showing the helper process and its connection present and then gone while
+the others remain, plus the server log line —
+`report/captures/capture_exp8.txt`.
+⚠ Add the `tcpdump` capture (needs root) showing the `FIN` at the moment of the
+kill.
 
 ---
 
 ## Bonus — Connection Scalability and I/O Design
 
 **Setup.** `bin/conn_gen` opens and holds N idle TCP connections, exchanging no
-application data. `tools/measure_scalability.sh` drives the whole sweep, taking
-each row while the connections are simultaneously established and idle.
+application data. `tools/measure_scalability.sh` drives the sweep, taking each
+row while the connections are simultaneously established and idle.
 
 ```sh
-# system limits raised first
-sysctl kern.maxfiles=200000
-sysctl kern.maxfilesperproc=200000
-ifconfig lo0 alias 127.0.0.2/8
-ifconfig lo0 alias 127.0.0.3/8
-
-SRC_IPS=127.0.0.1,127.0.0.2,127.0.0.3 tools/measure_scalability.sh 127.0.0.1 5000
+sh tools/measure_scalability.sh 127.0.0.1 5000 5000 10000 20000 30000 40000
 ```
+
+**The limits this VM starts from.**
+
+```
+kern.maxfiles:               64302        (system-wide open files)
+kern.maxfilesperproc:        57870        (per process)
+ulimit -n (after raising):   57870
+net.inet.ip.portrange:       10000-65535  (55,536 ephemeral ports)
+hw.physmem:                  2 GB
+```
+
+Two of these bound the experiment before the server does. Because **both**
+endpoints of every connection live inside this VM, each connection consumes
+**two** system-wide file entries, so `kern.maxfiles` alone caps the reachable
+count at roughly **32,000**, not 64,302. Separately, all connections from a
+single source address to a single `(dest ip, dest port)` must have distinct
+ephemeral ports, capping a one-address run at ~55,000.
 
 **Measurements.** _[Fill in from `report/scalability.tsv`.]_
 
-| Idle connections | Server memory | Server CPU | Server open fds | System-wide open files | Socket-buffer usage / limit | Max connections established |
-|---|---|---|---|---|---|---|
-| 10,000 | | | | | | |
-| 20,000 | | | | | | |
-| 30,000 | | | | | | |
-| 40,000 | | | | | | |
-| 50,000 | | | | | | |
-| 60,000 | | | | | | |
-| 70,000 | | | | | | |
+| Idle connections | Established | Server RSS (KiB) | Server CPU % | Server open fds | System open files | Network memory | Max established |
+|---|---|---|---|---|---|---|---|
+| 5,000 | | | | | | | |
+| 10,000 | | | | | | | |
+| 20,000 | | | | | | | |
+| 30,000 | | | | | | | |
+| 40,000 | | | | | | | |
 
 **1. Is the server able to maintain all requested connections at each count?**
-_[Answer from the table. If a count fails, name it and quote the errno
-`conn_gen` reported — `EMFILE` means the server hit its per-process descriptor
-limit, `ENOBUFS`/`ENOMEM` means kernel socket-buffer memory, and
-`EADDRNOTAVAIL` on the client side means ephemeral port exhaustion, which is a
-limit of the load generator and not of the server.]_
+_[Answer from the table; `report/conn_gen_<N>.log` names the connection number
+at which each run first failed and the errno.]_ `EMFILE` indicates the
+descriptor limit, `ENOBUFS`/`ENOMEM` kernel socket-buffer memory, and
+`EADDRNOTAVAIL` on the client side indicates ephemeral-port exhaustion — a
+limit of the load generator, not of the server, and one that `--src-ips` works
+around.
 
 **2. What is the first significant bottleneck?**
-_[Support with the table.]_ The expected order for this design is: the
-per-process descriptor limit (`kern.maxfilesperproc`) first, since the server
-needs one descriptor per connection and nothing else grows as fast; then kernel
-socket-buffer memory (`netstat -m`), because every connection carries a send and
-a receive buffer whose minimum allocation dwarfs the server's own per-connection
-state. Server RSS should grow only modestly — a `ClientSession` with two empty
-`std::string`s and a hash-table slot is on the order of 150–250 bytes — and CPU
-should stay near zero, because idle connections generate no events.
+The **file-descriptor limit**, and it is reached at about half the nominal
+figure because both ends of each connection are local: at N connections the
+system holds 2N open files against `kern.maxfiles` = 64,302. Server RSS grows
+only modestly — a `ClientSession` holding two empty `std::string`s plus a
+hash-table slot is on the order of 150–250 bytes, so 30,000 sessions is a few
+megabytes of application state — and CPU stays near zero, because idle
+connections generate no events at all. Kernel socket-buffer memory
+(`netstat -m`) is the next constraint behind descriptors.
 
 **3. How does the concurrency/I/O design contribute to it?**
-The server uses **I/O multiplexing with a single thread**, not a thread or
-process per connection. Consequently there is no per-connection stack, no
-scheduler entry and no context-switch cost, and the bottleneck is pushed onto
-kernel-side per-socket resources — descriptors and socket buffers — rather than
-onto the application. A thread-per-connection server would have failed far
-earlier: at the default 8 MB stack reservation, 70,000 threads would need
-~550 GB of address space, and the scheduler would be the limit long before the
-descriptor table was.
+The server uses **I/O multiplexing on a single thread**, not a thread or
+process per connection. There is therefore no per-connection stack, no
+scheduler entry and no context-switch cost, and the limit lands on kernel
+per-socket resources — descriptors and socket buffers — rather than on
+anything the application does. A thread-per-connection design would have failed
+far earlier: at the default 8 MB stack reservation, 70,000 threads would need
+roughly 550 GB of address space, and on 2 vCPUs the scheduler would have become
+the bottleneck long before the descriptor table did.
 
 **4. Would changing the mechanism help?**
-Not for the bottleneck identified. Descriptor limits and socket-buffer memory
-are per-socket kernel costs, and are the same whether readiness comes from
-`poll()`, `kqueue()` or a thread. What the mechanism changes is the **cost per
-event loop iteration**: `poll()` copies and scans an array of all N descriptors
-on every call, which is O(N) even when nothing is ready, whereas `kqueue()`
-registers interest once and returns only the ready descriptors, which is
-O(ready). At 70,000 mostly-idle connections that is the difference between
-scanning 70,000 entries per wakeup and being handed the two that matter — so
-`kqueue` reduces CPU and latency, but not memory or descriptor consumption. Going
-the other way, replacing multiplexing with thread-per-connection would make
-things dramatically worse.
+Not for this bottleneck. Descriptor limits and socket-buffer memory are
+per-socket kernel costs, identical whether readiness comes from `poll()`,
+`kqueue()` or a thread. What the mechanism changes is the **cost per event-loop
+iteration**: `poll()` copies and scans an array of all N descriptors on every
+call, O(N) even when nothing is ready, whereas `kqueue()` registers interest
+once and returns only the ready descriptors, O(ready). At tens of thousands of
+mostly-idle connections that is the difference between scanning the whole set
+on every wakeup and being handed the one or two that matter — so `kqueue`
+reduces CPU and latency, but not memory or descriptor consumption. Going the
+other way, replacing multiplexing with thread-per-connection would make
+everything worse.
 
 **5. Quantify the trade-off.**
-The same server binary supports both mechanisms, so the comparison is direct:
+The same binary supports both mechanisms, so the comparison is direct:
 
 ```sh
-EXCHANGE_BACKEND=poll   ./bin/exchange_server 127.0.0.1 5000
-EXCHANGE_BACKEND=kqueue ./bin/exchange_server 127.0.0.1 5000
+EXCHANGE_BACKEND=poll   sh tools/measure_scalability.sh 127.0.0.1 5000 10000 20000 30000
+EXCHANGE_BACKEND=kqueue sh tools/measure_scalability.sh 127.0.0.1 5000 10000 20000 30000
 ```
 
-_[Hold N idle connections under each backend, drive a steady trickle of trades
-so the loop wakes up regularly, and record server CPU with `top` and the RSS
-delta. Report both.]_ The expectation is near-identical memory and descriptor
-usage, with CPU per wakeup growing linearly in N for `poll` and staying flat for
-`kqueue`.
+_[Record server CPU under each backend at the same connection counts, with a
+steady trickle of trades so the loop wakes regularly.]_ The expectation is
+near-identical RSS and descriptor usage, with CPU per wakeup growing linearly
+in N under `poll` and staying flat under `kqueue`.
+
+**Reaching 70,000 connections.** It cannot be done with this VM's stock
+settings; the following are needed (all require root):
+
+```sh
+sysctl kern.maxfiles=250000            # 2 file entries per loopback connection
+sysctl kern.maxfilesperproc=200000
+ifconfig lo0 alias 127.0.0.2/8         # each source address has its own
+ifconfig lo0 alias 127.0.0.3/8         # ephemeral port range
+sysctl net.inet.ip.portrange.first=10000
+
+SRC_IPS=127.0.0.1,127.0.0.2,127.0.0.3 \
+    sh tools/measure_scalability.sh 127.0.0.1 5000 50000 60000 70000
+```
+
+Memory is the remaining question at that scale: with 2 GB of RAM and FreeBSD
+auto-sizing socket buffers from a small initial allocation, 70,000 idle
+connections are plausible only because idle buffers stay small; any real
+traffic on them would not fit.
 
 **Bonus deliverables checklist.**
 
 - [x] Client-generation program: `src/tools/conn_gen.cpp` (`bin/conn_gen`).
 - [ ] Completed resource-measurement table (above).
-- [ ] Screenshots of the FreeBSD commands and outputs at 10,000 / 40,000 /
-      70,000 idle connections, each showing the active connection count and the
+- [ ] Screenshots of the FreeBSD commands and outputs at the required
+      connection counts, each showing the active connection count and the
       corresponding measurements.
 - [ ] Analysis answering questions 1–5 (above).

@@ -1,0 +1,182 @@
+Experiment 7 capture
+host:   FreeBSD exchange-vm 15.1-RELEASE-p3 FreeBSD 15.1-RELEASE-p3 releng/15.1-n283611-88e7371d9dc2 GENERIC amd64
+date:   Wed Sep  9 23:43:23 IST 2026
+server: ok
+
+===== traffic running: slow vs normal subscriber  (t+20s) =====
+
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+tejasvi exchange_s 4623  4 tcp4  127.0.0.1:5000        *:*                  
+tejasvi exchange_s 4623  5 tcp4  127.0.0.1:5000        127.0.0.1:43485      
+tejasvi exchange_s 4623  6 tcp4  127.0.0.1:5000        127.0.0.1:42665      
+tejasvi exchange_s 4623  7 tcp4  127.0.0.1:5000        127.0.0.1:12206      
+tejasvi exchange_s 4623  8 tcp4  127.0.0.1:5000        127.0.0.1:44735      
+tejasvi python3.12 4621  3 tcp4  127.0.0.1:43485       127.0.0.1:5000       
+tejasvi python3.12 4621  4 tcp4  127.0.0.1:42665       127.0.0.1:5000       
+tejasvi python3.12 4621  5 tcp4  127.0.0.1:12206       127.0.0.1:5000       
+tejasvi python3.12 4621  6 tcp4  127.0.0.1:44735       127.0.0.1:5000       
+
+$ netstat -an -p tcp | grep -E '5000|Proto|Recv-Q'
+Proto     Recv-Q Send-Q Local Address          Foreign Address        (state)    
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.44735        ESTABLISHED
+tcp4          36      0 127.0.0.1.44735        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.12206        ESTABLISHED
+tcp4           0      0 127.0.0.1.12206        127.0.0.1.5000         ESTABLISHED
+tcp4           0     17 127.0.0.1.5000         127.0.0.1.42665        ESTABLISHED
+tcp4        9656      0 127.0.0.1.42665        127.0.0.1.5000         ESTABLISHED
+tcp4           0     17 127.0.0.1.5000         127.0.0.1.43485        ESTABLISHED
+tcp4          17      0 127.0.0.1.43485        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         *.*                    LISTEN     
+
+$ procstat -f 4623 | head -20
+  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        
+ 4623 exchange_server   text v r r-------   -       - -   /home/tejasvi/exchange/bin/exchange_server
+ 4623 exchange_server    cwd v d r-------   -       - -   /home/tejasvi/exchange
+ 4623 exchange_server   root v d r-------   -       - -   /                 
+ 4623 exchange_server      0 v c r-------   2       0 -   /dev/null         
+ 4623 exchange_server      1 v r -w------   4    1146 -   -                 
+ 4623 exchange_server      2 v r -w------   4    1146 -   -                 
+ 4623 exchange_server      3 k - rw------   2       0 -   -                 
+ 4623 exchange_server      4 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 *:0
+ 4623 exchange_server      5 s - rw---n--   2       0 TCP 17 0 127.0.0.1:5000 127.0.0.1:43485
+ 4623 exchange_server      6 s - rw---n--   2       0 TCP 17 0 127.0.0.1:5000 127.0.0.1:42665
+ 4623 exchange_server      7 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:12206
+ 4623 exchange_server      8 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:44735
+
+$ ps -o pid,rss,%cpu,wchan,command -p 4623
+ PID  RSS %CPU WCHAN  COMMAND
+4623 3624  0.0 kqread /home/tejasvi/exchange/bin/exchange_server 127.0.0.1 5000
+
+===== traffic running: later  (t+45s) =====
+
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+tejasvi exchange_s 4623  4 tcp4  127.0.0.1:5000        *:*                  
+tejasvi exchange_s 4623  5 tcp4  127.0.0.1:5000        127.0.0.1:43485      
+tejasvi exchange_s 4623  6 tcp4  127.0.0.1:5000        127.0.0.1:42665      
+tejasvi exchange_s 4623  7 tcp4  127.0.0.1:5000        127.0.0.1:12206      
+tejasvi exchange_s 4623  8 tcp4  127.0.0.1:5000        127.0.0.1:44735      
+tejasvi python3.12 4621  3 tcp4  127.0.0.1:43485       127.0.0.1:5000       
+tejasvi python3.12 4621  4 tcp4  127.0.0.1:42665       127.0.0.1:5000       
+tejasvi python3.12 4621  5 tcp4  127.0.0.1:12206       127.0.0.1:5000       
+tejasvi python3.12 4621  6 tcp4  127.0.0.1:44735       127.0.0.1:5000       
+
+$ netstat -an -p tcp | grep -E '5000|Proto|Recv-Q'
+Proto     Recv-Q Send-Q Local Address          Foreign Address        (state)    
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.44735        ESTABLISHED
+tcp4           0      0 127.0.0.1.44735        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.12206        ESTABLISHED
+tcp4           0      0 127.0.0.1.12206        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.42665        ESTABLISHED
+tcp4       21828      0 127.0.0.1.42665        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.43485        ESTABLISHED
+tcp4           0      0 127.0.0.1.43485        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         *.*                    LISTEN     
+
+$ procstat -f 4623 | head -20
+  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        
+ 4623 exchange_server   text v r r-------   -       - -   /home/tejasvi/exchange/bin/exchange_server
+ 4623 exchange_server    cwd v d r-------   -       - -   /home/tejasvi/exchange
+ 4623 exchange_server   root v d r-------   -       - -   /                 
+ 4623 exchange_server      0 v c r-------   2       0 -   /dev/null         
+ 4623 exchange_server      1 v r -w------   4    1146 -   -                 
+ 4623 exchange_server      2 v r -w------   4    1146 -   -                 
+ 4623 exchange_server      3 k - rw------   2       0 -   -                 
+ 4623 exchange_server      4 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 *:0
+ 4623 exchange_server      5 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:43485
+ 4623 exchange_server      6 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:42665
+ 4623 exchange_server      7 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:12206
+ 4623 exchange_server      8 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:44735
+
+$ ps -o pid,rss,%cpu,wchan,command -p 4623
+ PID  RSS %CPU WCHAN  COMMAND
+4623 3624  0.0 kqread /home/tejasvi/exchange/bin/exchange_server 127.0.0.1 5000
+
+===== traffic running: later still  (t+70s) =====
+
+$ sockstat -4 -p 5000
+USER    COMMAND     PID FD PROTO LOCAL ADDRESS         FOREIGN ADDRESS      
+tejasvi exchange_s 4623  4 tcp4  127.0.0.1:5000        *:*                  
+tejasvi exchange_s 4623  5 tcp4  127.0.0.1:5000        127.0.0.1:43485      
+tejasvi exchange_s 4623  6 tcp4  127.0.0.1:5000        127.0.0.1:42665      
+tejasvi exchange_s 4623  7 tcp4  127.0.0.1:5000        127.0.0.1:12206      
+tejasvi exchange_s 4623  8 tcp4  127.0.0.1:5000        127.0.0.1:44735      
+tejasvi python3.12 4621  3 tcp4  127.0.0.1:43485       127.0.0.1:5000       
+tejasvi python3.12 4621  4 tcp4  127.0.0.1:42665       127.0.0.1:5000       
+tejasvi python3.12 4621  5 tcp4  127.0.0.1:12206       127.0.0.1:5000       
+tejasvi python3.12 4621  6 tcp4  127.0.0.1:44735       127.0.0.1:5000       
+
+$ netstat -an -p tcp | grep -E '5000|Proto|Recv-Q'
+Proto     Recv-Q Send-Q Local Address          Foreign Address        (state)    
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.44735        ESTABLISHED
+tcp4          36      0 127.0.0.1.44735        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.12206        ESTABLISHED
+tcp4           0      0 127.0.0.1.12206        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.42665        ESTABLISHED
+tcp4       34017      0 127.0.0.1.42665        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         127.0.0.1.43485        ESTABLISHED
+tcp4          17      0 127.0.0.1.43485        127.0.0.1.5000         ESTABLISHED
+tcp4           0      0 127.0.0.1.5000         *.*                    LISTEN     
+
+$ procstat -f 4623 | head -20
+  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        
+ 4623 exchange_server   text v r r-------   -       - -   /home/tejasvi/exchange/bin/exchange_server
+ 4623 exchange_server    cwd v d r-------   -       - -   /home/tejasvi/exchange
+ 4623 exchange_server   root v d r-------   -       - -   /                 
+ 4623 exchange_server      0 v c r-------   2       0 -   /dev/null         
+ 4623 exchange_server      1 v r -w------   4    1146 -   -                 
+ 4623 exchange_server      2 v r -w------   4    1146 -   -                 
+ 4623 exchange_server      3 k - rw------   2       0 -   -                 
+ 4623 exchange_server      4 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 *:0
+ 4623 exchange_server      5 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:43485
+ 4623 exchange_server      6 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:42665
+ 4623 exchange_server      7 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:12206
+ 4623 exchange_server      8 s - rw---n--   2       0 TCP 0 0 127.0.0.1:5000 127.0.0.1:44735
+
+$ ps -o pid,rss,%cpu,wchan,command -p 4623
+ PID  RSS %CPU WCHAN  COMMAND
+4623 3624  0.0 kqread /home/tejasvi/exchange/bin/exchange_server 127.0.0.1 5000
+
+===== server log =====
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:50963 (1 clients)
+Exchange Server is listening.
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:43485 (1 clients)
+[+] connection accepted: fd 6 from 127.0.0.1:42665 (2 clients)
+[+] connection accepted: fd 7 from 127.0.0.1:12206 (3 clients)
+[+] connection accepted: fd 8 from 127.0.0.1:44735 (4 clients)
+[=] fd 7 is trader 'experiment_buyer'
+[=] fd 8 is trader 'experiment_seller'
+[=] fd 5 is a market-data client
+[=] fd 6 is a market-data client
+
+===== harness output =====
+=== Experiment 7: Backpressure and the Slow Receiver ===
+
+Started Exchange Server (PID 4623).
+Exchange Server listening on 127.0.0.1:5000 (listening socket fd 4, I/O backend kqueue)
+[+] connection accepted: fd 5 from 127.0.0.1:50963 (1 clients)
+Exchange Server is listening.
+
+Normal Market-Data Client: connected from 127.0.0.1:43485
+Slow Market-Data Client: connected from 127.0.0.1:42665
+[-] connection closed: fd 5 - recv() failed: Connection reset by peer (0 clients remain)
+[+] connection accepted: fd 5 from 127.0.0.1:43485 (1 clients)
+[+] connection accepted: fd 6 from 127.0.0.1:42665 (2 clients)
+[+] connection accepted: fd 7 from 127.0.0.1:12206 (3 clients)
+Buyer Trader: connected from 127.0.0.1:12206
+[+] connection accepted: fd 8 from 127.0.0.1:44735 (4 clients)
+Seller Trader: connected from 127.0.0.1:44735
+[=] fd 7 is trader 'experiment_buyer'
+[=] fd 8 is trader 'experiment_seller'
+[=] fd 5 is a market-data client
+[=] fd 6 is a market-data client
+
+Both Market-Data Clients are subscribed to JNST.
+The normal client will keep reading.
+The slow client will not read market-data updates.
+
+Generating up to 5000 matching trades...
+
