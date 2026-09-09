@@ -24,8 +24,10 @@ bool TCPServer::start(int backlog) {
     return fd_ >= 0;
 }
 
-int TCPServer::accept_connection(bool* again, std::string* peer) {
+int TCPServer::accept_connection(bool* again, std::string* peer,
+                                 bool* exhausted) {
     if (again) *again = false;
+    if (exhausted) *exhausted = false;
 
     struct sockaddr_in address;
     socklen_t address_len = sizeof(address);
@@ -38,6 +40,10 @@ int TCPServer::accept_connection(bool* again, std::string* peer) {
             // The peer went away between the SYN and our accept(); the
             // listening socket itself is still healthy.
             if (again) *again = false;
+        } else if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS ||
+                   errno == ENOMEM) {
+            if (exhausted) *exhausted = true;
+            error_ = std::string("accept() failed: ") + std::strerror(errno);
         } else {
             error_ = std::string("accept() failed: ") + std::strerror(errno);
         }
@@ -50,6 +56,7 @@ int TCPServer::accept_connection(bool* again, std::string* peer) {
         close(client_fd);
         return -1;
     }
+
     net::set_tcp_nodelay(client_fd);
 
     if (peer != nullptr) {

@@ -9,6 +9,7 @@
 
 #include <signal.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -49,9 +50,28 @@ constexpr std::size_t kMaxOutputBytes = 16 * 1024 * 1024;
 
 constexpr std::size_t kReadChunk = 65536;
 
+// How long to stop accepting after a resource-exhaustion failure, before
+// trying again. Long enough that the server is not burning CPU on a condition
+// it cannot fix, short enough to recover promptly once descriptors free up.
+constexpr double kAcceptBackoffSeconds = 1.0;
+
+// Per-connection logging is what makes the experiment runs readable, but at
+// the scale of the connection bonus it becomes the bottleneck: every line is
+// a write() to the log, and while the server is writing it is not accepting,
+// so the 128-entry accept queue overflows and the kernel resets incoming
+// connections. Above this many clients, connection logging is summarised.
+constexpr std::size_t kVerboseConnectionLimit = 64;
+constexpr std::size_t kConnectionLogInterval = 1000;
+
 volatile sig_atomic_t g_stop = 0;
 
 void on_signal(int) { g_stop = 1; }
+
+double monotonic_seconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
 
 bool env_flag(const char* name) {
     const char* value = std::getenv(name);
@@ -103,6 +123,8 @@ public:
                 break;
             }
 
+            resume_accepting_if_due();
+
             for (const net::Event& event : events) {
                 if (g_stop) break;
 
@@ -147,6 +169,10 @@ private:
     std::vector<int> closed_fds_;
     OrderBook book_;
 
+    // While non-zero, accepting is suspended until this monotonic timestamp
+    // because the system ran out of descriptors or socket memory.
+    double accept_resume_at_ = 0.0;
+
     // --- connection lifecycle ---------------------------------------------
 
     void accept_pending() {
@@ -154,10 +180,15 @@ private:
         // wakeup can correspond to several completed handshakes.
         for (;;) {
             bool again = false;
+            bool exhausted = false;
             std::string peer;
-            int fd = listener_.accept_connection(&again, &peer);
+            int fd = listener_.accept_connection(&again, &peer, &exhausted);
             if (fd < 0) {
                 if (again) return;
+                if (exhausted) {
+                    pause_accepting();
+                    return;
+                }
                 if (!listener_.error().empty()) {
                     std::fprintf(stderr, "exchange_server: %s\n",
                                  listener_.error().c_str());
@@ -179,10 +210,50 @@ private:
                 continue;
             }
 
-            std::printf("[+] connection accepted: fd %d from %s (%zu clients)\n",
-                        fd, sessions_[fd].peer.c_str(), sessions_.size());
-            std::fflush(stdout);
+            log_connection_count("[+] connection accepted: fd " +
+                                     std::to_string(fd) + " from " +
+                                     sessions_[fd].peer,
+                                 sessions_.size());
         }
+    }
+
+    // Logs a connection event, in full while there are few clients and only
+    // periodically once there are many. See kVerboseConnectionLimit.
+    void log_connection_count(const std::string& message, std::size_t clients) {
+        const bool verbose_scale = clients <= kVerboseConnectionLimit;
+        if (!verbose_scale && clients % kConnectionLogInterval != 0) return;
+
+        std::printf("%s (%zu clients)\n", message.c_str(), clients);
+        // Flushing every line is what keeps the experiment logs interleaved
+        // correctly with the harness output; at scale the lines are rare.
+        std::fflush(stdout);
+    }
+
+    // Suspends accepting after a resource-exhaustion failure.
+    //
+    // The listening socket stays readable while connections are pending, so
+    // returning without accepting would have the event loop hand it straight
+    // back and the server would spin at full CPU logging the same error. (An
+    // earlier version did exactly that: a run that exhausted the system file
+    // table produced 558,971 identical error lines.) Read interest is dropped
+    // for a short interval instead, which also lets the pending connections
+    // sit in the accept queue until descriptors are available again.
+    void pause_accepting() {
+        if (accept_resume_at_ != 0.0) return;  // already backing off
+        accept_resume_at_ = monotonic_seconds() + kAcceptBackoffSeconds;
+        loop_.update(listener_.fd(), false, false);
+        std::fprintf(stderr,
+                     "exchange_server: %s; not accepting for %.0fs "
+                     "(%zu clients connected)\n",
+                     listener_.error().c_str(), kAcceptBackoffSeconds,
+                     sessions_.size());
+    }
+
+    void resume_accepting_if_due() {
+        if (accept_resume_at_ == 0.0) return;
+        if (monotonic_seconds() < accept_resume_at_) return;
+        accept_resume_at_ = 0.0;
+        loop_.update(listener_.fd(), true, false);
     }
 
     // Detaches a session from all server state. The descriptor itself is
@@ -198,10 +269,9 @@ private:
         if (session.logged_in) usernames_.erase(session.username);
         book_.remove_orders_of(fd);
 
-        std::printf("[-] connection closed: %s - %s (%zu clients remain)\n",
-                    session.label().c_str(), reason.c_str(),
-                    sessions_.size() - 1);
-        std::fflush(stdout);
+        log_connection_count("[-] connection closed: " + session.label() +
+                                 " - " + reason,
+                             sessions_.size() - 1);
 
         sessions_.erase(it);
         loop_.remove(fd);

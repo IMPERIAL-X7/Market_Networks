@@ -24,9 +24,14 @@ public:
     // Returns -1 when the backlog is momentarily empty (EAGAIN) or the
     // connection died before it could be accepted; `again` distinguishes
     // "nothing left to accept" from a real error.
+    //
+    // `exhausted` is set when the failure was a resource limit (EMFILE,
+    // ENFILE, ENOBUFS, ENOMEM). Retrying immediately in that case is futile
+    // and harmful: the listening socket stays readable, so the event loop
+    // reports it again at once and the server spins at full CPU.
     // `peer` receives the client's "ip:port" as reported by accept() itself,
     // which stays available even if the connection is reset immediately after.
-    int accept_connection(bool* again, std::string* peer);
+    int accept_connection(bool* again, std::string* peer, bool* exhausted);
 
     int fd() const { return fd_; }
     int port() const { return port_; }
