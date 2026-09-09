@@ -7,9 +7,9 @@ root=$(cd "$here/.." && pwd)
 
 # Build on demand so a clean checkout works, but build only this one program:
 # the experiment harness allows just a few seconds for the server to start.
-# Running "make" once beforehand avoids the delay entirely.
+# Running "sh tools/build.sh" once beforehand avoids the delay entirely.
 if [ ! -x "$root/bin/trader_client" ]; then
-    make -C "$root" -j4 "bin/trader_client" >&2
+    sh "$root/tools/build.sh" trader_client >&2
 fi
 
 exec "$root/bin/trader_client" "$@"

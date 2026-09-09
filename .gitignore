@@ -5,3 +5,4 @@ build/
 A2_*.zip
 report/scalability.tsv
 report/conn_gen_*.log
+BSD_instruct.md
